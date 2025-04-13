@@ -1,0 +1,395 @@
+#pragma kernel ApplySpringForces
+#pragma kernel InitParticles
+#pragma kernel ClearGrid
+#pragma kernel BuildHashGrid
+#pragma kernel ApplySPHForces
+#pragma kernel ApplyDragForce
+#pragma kernel UpdateMotion
+#pragma kernel UpdateRotation
+#pragma kernel CopyPositionsToReadbackBuffer
+#pragma kernel CopyRotationsToReadbackBuffer
+
+#pragma target 5.0
+
+#define THREADS 64
+#define GRID_DIM 32
+#define GRID_CELL_SIZE 4.0f
+#define GRID_TOTAL (GRID_DIM * GRID_DIM * GRID_DIM)
+#define TORQUE_SCALE 10000
+
+// ✅ 80-byte aligned Particle struct
+struct Particle {
+    float3 position;            // 12
+    float  radius;              //  4
+
+    float3 velocity;            // 12
+    float  mass;                //  4
+
+    float3 angularVelocity;     // 12
+    float  momentOfInertia;     //  4
+
+    float  drag;                //  4
+    float  repulsionStrength;   //  4
+    float2 padding0;            //  8  <-- ensures alignment
+
+    float4 rotation;            // 16
+}; // Total = 80 bytes
+
+struct DragInput {
+    int selectedID;
+    float3 targetPosition;
+    float strength;
+};
+
+RWStructuredBuffer<Particle> particleBuffer;
+RWStructuredBuffer<float3> positionReadbackBuffer;
+RWStructuredBuffer<float4> rotationReadbackBuffer;
+RWStructuredBuffer<int3> torqueAccumBuffer;
+StructuredBuffer<DragInput> dragInput;
+
+RWStructuredBuffer<uint> gridHeads;
+RWStructuredBuffer<uint> gridNext;
+RWStructuredBuffer<uint> gridParticleIndices;
+
+float deltaTime;
+float spawnRadius;
+float minRadius;
+float maxRadius;
+float globalDragMultiplier;
+float torqueFactor;
+float torqueDamping;
+float boundaryFriction;
+float rollingContactRadiusMultiplier;
+float density;
+
+uint3 GetGridCoord(float3 pos) {
+    float3 gridPos = (pos + spawnRadius) / GRID_CELL_SIZE;
+    return clamp((uint3)gridPos, 0, GRID_DIM - 1);
+}
+
+uint GridHash(uint3 coord) {
+    return coord.x + coord.y * GRID_DIM + coord.z * GRID_DIM * GRID_DIM;
+}
+
+[numthreads(THREADS, 1, 1)]
+void ClearGrid(uint id : SV_DispatchThreadID)
+{
+    if (id >= GRID_TOTAL) return;
+    gridHeads[id] = 0xffffffff;
+}
+
+[numthreads(THREADS, 1, 1)]
+void InitParticles(uint id : SV_DispatchThreadID)
+{
+    if (id >= (uint)particleBuffer.Length) return;
+
+    uint seed = id * 65537 + 17;
+    
+    // Generate random direction (same as before)
+    float3 dir = normalize(float3(
+        frac(sin(seed * 12.9898) * 43758.5453) * 2 - 1,
+        frac(sin(seed * 78.233) * 43758.5453) * 2 - 1,
+        frac(sin(seed * 91.934) * 43758.5453) * 2 - 1
+    ));
+    
+    // Improved radial distribution: apply cube root to get uniform volume distribution
+    float randVal = frac(sin(seed * 1.2345) * 10000.0f);
+    float dist = pow(randVal, 1.0f/3.0f) * spawnRadius;
+
+    Particle p;
+    p.position = dir * dist;
+    p.velocity = float3(0, 0, 0);
+    p.radius = lerp(minRadius, maxRadius, frac(sin(seed * 3.456) * 999.0f));
+
+    // Option for stratified sampling to reduce clumping
+    // Uncomment if you want particles to have more consistent spacing
+
+    if (id > 0) {
+        // Add a small repulsion from previous particles
+        float repelDist = pow(0.5f * (float)id / particleBuffer.Length, 1.0f/3.0f) * spawnRadius * 0.1f;
+        p.position += normalize(float3(
+            frac(sin(seed * 45.678) * 43758.5453) * 2 - 1,
+            frac(sin(seed * 67.890) * 43758.5453) * 2 - 1,
+            frac(sin(seed * 12.345) * 43758.5453) * 2 - 1
+        )) * repelDist;
+    }
+
+
+    float volume = (4.0f / 3.0f) * 3.1415926f * pow(p.radius, 3);
+    p.mass = density * volume;
+    p.momentOfInertia = (2.0f / 5.0f) * p.mass * p.radius * p.radius;
+
+    p.drag = lerp(0.5f, 1.0f, frac(sin(seed * 5.6789) * 888.0f));
+    p.repulsionStrength = 1.0f;
+    p.angularVelocity = float3(0, 0, 0);
+    p.rotation = float4(0, 0, 0, 1);
+    p.padding0 = float2(0, 0); // optional, just for safety
+
+    particleBuffer[id] = p;
+    torqueAccumBuffer[id] = int3(0, 0, 0);
+}
+
+[numthreads(THREADS, 1, 1)]
+void BuildHashGrid(uint id : SV_DispatchThreadID)
+{
+    if (id >= (uint)particleBuffer.Length) return;
+    Particle p = particleBuffer[id];
+    uint3 coord = GetGridCoord(p.position);
+    uint hash = GridHash(coord);
+
+    gridParticleIndices[id] = id;
+
+    uint previous;
+    InterlockedExchange(gridHeads[hash], id, previous);
+    gridNext[id] = previous;
+}
+
+[numthreads(THREADS, 1, 1)]
+void ApplySPHForces(uint id : SV_DispatchThreadID)
+{
+    if (id >= (uint)particleBuffer.Length) return;
+
+    Particle self = particleBuffer[id];
+    float3 posA = self.position;
+    float3 velA = self.velocity;
+    float3 omegaA = self.angularVelocity;
+    float rA = self.radius;
+
+    float3 totalForce = float3(0, 0, 0);
+    float3 totalTorque = float3(0, 0, 0);
+    float repulsionStrength = 200.0f;
+
+    float effectiveRadiusA = rA * 0.5f;
+    uint3 baseCoord = GetGridCoord(posA);
+
+    for (int dz = -1; dz <= 1; dz++)
+    for (int dy = -1; dy <= 1; dy++)
+    for (int dx = -1; dx <= 1; dx++)
+    {
+        int3 icoord = (int3)baseCoord + int3(dx, dy, dz);
+        if (any(icoord < 0) || any(icoord >= GRID_DIM)) continue;
+
+        uint hash = GridHash(uint3(icoord));
+        uint j = gridHeads[hash];
+
+        while (j != 0xffffffff)
+        {
+            if (j != id)
+            {
+                Particle other = particleBuffer[j];
+                float3 posB = other.position;
+                float3 velB = other.velocity;
+                float3 omegaB = other.angularVelocity;
+                float rB = other.radius;
+
+                float effectiveRadiusB = rB * 0.5f;
+                float3 delta = posA - posB;
+                float dist = length(delta);
+                float overlap = (effectiveRadiusA + effectiveRadiusB) - dist;
+
+                if (overlap > 0.001f)
+                {
+                    float3 dir = delta / dist;
+
+                    // --- Repulsion
+                    float overlapFalloff = saturate(overlap / (effectiveRadiusA + effectiveRadiusB));
+                    float falloff = saturate(1.0f - dist / (effectiveRadiusA + effectiveRadiusB));
+                    float3 repulsion = dir * falloff * repulsionStrength * overlapFalloff;
+                    totalForce += repulsion;
+
+                    // --- Rolling Contact Friction
+                    float3 surfaceVelA = velA + cross(omegaA, dir * effectiveRadiusA);
+                    float3 surfaceVelB = velB + cross(omegaB, -dir * effectiveRadiusB);
+                    float3 tangentialVelocity = surfaceVelA - surfaceVelB;
+
+                    float lenTV = length(tangentialVelocity);
+                    if (lenTV > 1e-4)
+                    {
+                        float3 frictionDir = normalize(tangentialVelocity);
+
+                        // 🔧 Safer pow() with abs() to avoid shader warning
+                        float torqueInput = abs(lenTV * torqueFactor);
+                        float frictionMag = pow(torqueInput, 1.25);
+                        frictionMag = min(frictionMag, 10.0f); // increased from 2.0
+
+                        // 🔧 Amplify torque based on overlap depth
+                        float torqueRadiusScale = pow(overlapFalloff, 2.0);
+                        float effectiveRadiusTorqueA = torqueRadiusScale * effectiveRadiusA * rollingContactRadiusMultiplier;
+                        float effectiveRadiusTorqueB = torqueRadiusScale * effectiveRadiusB * rollingContactRadiusMultiplier;
+
+                        // ✅ Full-strength torque — no artificial reduction
+                        float3 rollingTorqueA = cross(-dir * effectiveRadiusTorqueA, -frictionDir * frictionMag);
+                        float3 rollingTorqueB = cross( dir * effectiveRadiusTorqueB,  frictionDir * frictionMag);
+
+                        totalTorque += rollingTorqueA;
+
+                        int3 scaled = (int3)(rollingTorqueB * deltaTime * TORQUE_SCALE);
+                        InterlockedAdd(torqueAccumBuffer[j].x, scaled.x);
+                        InterlockedAdd(torqueAccumBuffer[j].y, scaled.y);
+                        InterlockedAdd(torqueAccumBuffer[j].z, scaled.z);
+                    }
+                }
+            }
+            j = gridNext[j];
+        }
+    }
+
+    float3 linearAccel = totalForce / self.mass;
+    float3 angularAccel = totalTorque / self.momentOfInertia;
+
+    self.velocity += linearAccel * deltaTime;
+    self.angularVelocity += angularAccel * deltaTime;
+
+    // Do NOT apply torque damping here — it’s done in UpdateRotation
+
+    particleBuffer[id] = self;
+}
+
+[numthreads(1, 1, 1)]
+void ApplyDragForce(uint id : SV_DispatchThreadID)
+{
+    if (id >= (uint)particleBuffer.Length) return;
+
+    DragInput input = dragInput[0];
+    if (input.selectedID < 0 || input.selectedID >= (int)particleBuffer.Length) return;
+
+    Particle p = particleBuffer[input.selectedID];
+    float3 toTarget = input.targetPosition - p.position;
+    float3 force = toTarget * input.strength * deltaTime;
+    p.velocity += force / p.mass;
+    particleBuffer[input.selectedID] = p;
+}
+
+[numthreads(THREADS, 1, 1)]
+void UpdateMotion(uint id : SV_DispatchThreadID)
+{
+    if (id >= (uint)particleBuffer.Length) return;
+    Particle p = particleBuffer[id];
+
+    float linearDamping = exp(-p.drag * globalDragMultiplier * deltaTime);
+    float angularDamping = exp(-torqueDamping * deltaTime);
+
+    p.velocity *= linearDamping;
+    p.angularVelocity *= angularDamping;
+    p.position += p.velocity * deltaTime;
+
+    float3 pos = p.position;
+    float distFromOrigin = length(pos);
+    if (distFromOrigin > spawnRadius)
+    {
+        float3 norm = normalize(pos);
+        p.position = norm * spawnRadius;
+        p.velocity = reflect(p.velocity, norm);
+
+        float3 tangentialVel = p.velocity - dot(p.velocity, norm) * norm;
+        float3 frictionDir = normalize(tangentialVel + 1e-6);
+        float frictionMag = length(tangentialVel) * boundaryFriction;
+
+        float effectiveRadius = p.radius * rollingContactRadiusMultiplier;
+        float3 torque = cross(-norm * effectiveRadius, -frictionDir * frictionMag);
+        p.angularVelocity += (torque / p.momentOfInertia) * deltaTime;
+    }
+
+    particleBuffer[id] = p;
+}
+
+float4 quat_mul(float4 q1, float4 q2)
+{
+    return float4(
+        q1.w * q2.xyz + q2.w * q1.xyz + cross(q1.xyz, q2.xyz),
+        q1.w * q2.w - dot(q1.xyz, q2.xyz)
+    );
+}
+
+[numthreads(THREADS, 1, 1)]
+void UpdateRotation(uint id : SV_DispatchThreadID)
+{
+    if (id >= (uint)particleBuffer.Length) return;
+
+    Particle p = particleBuffer[id];
+    int3 iTorque = torqueAccumBuffer[id];
+    float3 torque = (float3)iTorque / TORQUE_SCALE;
+
+    float3 angularAccel = torque / p.momentOfInertia;
+    p.angularVelocity += angularAccel;
+
+    // ✅ Now apply damping here
+    p.angularVelocity *= exp(-torqueDamping * deltaTime);
+
+    // Quaternion rotation update
+    float3 omega = p.angularVelocity;
+    float angle = length(omega * deltaTime);
+    if (angle > 0.00001f)
+    {
+        float3 axis = normalize(omega);
+        float s = sin(angle * 0.5f);
+        float c = cos(angle * 0.5f);
+        float4 dq = float4(axis * s, c);
+        p.rotation = normalize(quat_mul(dq, p.rotation));
+    }
+
+    torqueAccumBuffer[id] = int3(0, 0, 0);
+    particleBuffer[id] = p;
+}
+
+[numthreads(THREADS, 1, 1)]
+void CopyPositionsToReadbackBuffer(uint id : SV_DispatchThreadID)
+{
+    if (id >= (uint)particleBuffer.Length) return;
+    positionReadbackBuffer[id] = particleBuffer[id].position;
+}
+
+[numthreads(THREADS, 1, 1)]
+void CopyRotationsToReadbackBuffer(uint id : SV_DispatchThreadID)
+{
+    if (id >= (uint)particleBuffer.Length) return;
+    rotationReadbackBuffer[id] = particleBuffer[id].rotation;
+}
+
+struct SpringPair {
+    uint particleA;
+    uint particleB;
+};
+
+StructuredBuffer<SpringPair> springPairBuffer;
+uint springPairCount;
+float springStiffness;
+float springDamping;
+float springRestLength;
+float springFalloff;
+
+[numthreads(64, 1, 1)]
+void ApplySpringForces(uint id : SV_DispatchThreadID)
+{
+    if (id >= (uint)particleBuffer.Length) return;
+
+    for (uint i = 0; i < springPairCount; i++)
+    {
+        SpringPair pair = springPairBuffer[i];
+        if (pair.particleA == id || pair.particleB == id)
+        {
+            uint otherID = (pair.particleA == id) ? pair.particleB : pair.particleA;
+            if (otherID >= (uint)particleBuffer.Length) continue;
+
+            Particle pA = particleBuffer[id];
+            Particle pB = particleBuffer[otherID];
+
+            float3 delta = pA.position - pB.position;
+            float dist = length(delta);
+            if (dist < 1e-5) continue;
+
+            float3 dir = delta / dist;
+            float stretch = dist - springRestLength;
+
+            float3 relVel = pA.velocity - pB.velocity;
+            float springForceMag = springStiffness * stretch;
+            float dampingForceMag = dot(relVel, dir) * springDamping;
+
+            float attenuation = exp(-springFalloff * abs(stretch));
+            float3 totalForce = -dir * (springForceMag + dampingForceMag) * attenuation;
+
+            pA.velocity += (totalForce / pA.mass) * deltaTime;
+            particleBuffer[id] = pA;
+        }
+    }
+}
