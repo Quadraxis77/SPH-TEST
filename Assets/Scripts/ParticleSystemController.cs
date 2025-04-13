@@ -22,6 +22,7 @@ public class ParticleSystemController : MonoBehaviour
     [Range(0f, 10f)] public float boundaryFriction = 0.8f;
     [Range(1f, 10f)] public float rollingContactRadiusMultiplier = 5.0f;
     [Range(0f, 10f)] public float density = 1.0f;
+    [Range(0f, 500f)] public float repulsionStrength = 200.0f;
 
     [Header("Spring Force Settings")]
     [Range(0f, 500f)] public float springStiffness = 100f;
@@ -173,6 +174,7 @@ public class ParticleSystemController : MonoBehaviour
         computeShader.SetFloat("boundaryFriction", boundaryFriction);
         computeShader.SetFloat("rollingContactRadiusMultiplier", rollingContactRadiusMultiplier);
         computeShader.SetFloat("density", density);
+        computeShader.SetFloat("repulsionStrength", repulsionStrength);
 
         computeShader.SetFloat("springStiffness", springStiffness);
         computeShader.SetFloat("springDamping", springDamping);

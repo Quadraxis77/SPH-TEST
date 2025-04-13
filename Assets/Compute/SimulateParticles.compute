@@ -61,6 +61,7 @@ float torqueDamping;
 float boundaryFriction;
 float rollingContactRadiusMultiplier;
 float density;
+float repulsionStrength;
 
 uint3 GetGridCoord(float3 pos) {
     float3 gridPos = (pos + spawnRadius) / GRID_CELL_SIZE;
@@ -157,7 +158,6 @@ void ApplySPHForces(uint id : SV_DispatchThreadID)
 
     float3 totalForce = float3(0, 0, 0);
     float3 totalTorque = float3(0, 0, 0);
-    float repulsionStrength = 200.0f;
 
     float effectiveRadiusA = rA * 0.5f;
     uint3 baseCoord = GetGridCoord(posA);
