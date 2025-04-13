@@ -1,0 +1,38 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 588aa7f5f1d03fd4e98f94b07e735bb8, type: 3}
+  m_Name: NewCellGenome
+  m_EditorClassIdentifier: 
+  modes:
+  - index: 0
+    modeName: Mode 0
+    splitInterval: 0
+    isInitial: 1
+    parentMakeAdhesion: 0
+    modeColor: {r: 1, g: 1, b: 1, a: 0}
+    parentSplitYaw: 0
+    parentSplitPitch: 0
+    childAModeIndex: 0
+    childA_OrientationYaw: -7
+    childA_OrientationPitch: 0
+    childA_KeepAdhesion: 0
+    childBModeIndex: 0
+    childB_OrientationYaw: -180
+    childB_OrientationPitch: 0
+    childB_KeepAdhesion: 0
+    adhesionRestLength: 0
+    adhesionSpringStiffness: 0
+    adhesionSpringDamping: 0
+    orientationConstraintStrength: 0
+    maxAllowedAngleDeviation: 0
+    adhesionCanBreak: 0
+    adhesionBreakForce: 0

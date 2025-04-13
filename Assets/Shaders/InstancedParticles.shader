@@ -155,7 +155,17 @@ Shader "Custom/InstancedParticles_URP"
                     }
                 }
                 
-                float3 baseColor = cellColor * NdotL + 0.1; // Add ambient term
+                // Improved lighting calculation
+                float3 viewDir = normalize(GetWorldSpaceViewDir(input.worldPos));
+                float3 halfVector = normalize(lightDir + viewDir);
+                float NdotH = saturate(dot(input.normalWS, halfVector));
+                
+                // Calculate lighting components
+                float3 diffuse = cellColor * NdotL * light.color;
+                float3 ambient = cellColor * 0.3; // Stronger ambient for better visibility
+                float3 specular = pow(NdotH, 32.0) * float3(0.5, 0.5, 0.5) * light.color * 0.5; // Add specular highlight
+                
+                float3 baseColor = diffuse + ambient + specular;
 
                 // Optional red highlight if normal faces forward direction
                 float NdotF = dot(normalize(input.normalWS), normalize(input.forwardDir));

@@ -19,10 +19,9 @@ public class ParticleSystemController : MonoBehaviour
     [Range(0f, 500f)] public float repulsionStrength = 200.0f;
 
     [Header("Cell Division Settings")]
-    [Range(1f, 20f)] public float globalSplitTimerMin = 5f;
     [Range(0.1f, 5f)] public float spawnOverlapOffset = 0.5f;
     [Range(0.1f, 10f)] public float splitVelocityMagnitude = 0.5f;
-    public int maxCells = 64;
+    // Removed globalSplitTimerMin - now using mode-specific split intervals
 
     [Header("Genome Settings")]
     public CellGenome genome;
@@ -510,6 +509,44 @@ public class ParticleSystemController : MonoBehaviour
         computeShader.SetBuffer(kernelInitParticles, "particleBuffer", particleBuffer);
         computeShader.SetBuffer(kernelInitParticles, "torqueAccumBuffer", torqueAccumBuffer);
         computeShader.Dispatch(kernelInitParticles, Mathf.CeilToInt(particleCount / 64f), 1, 1);
+        
+        // Initialize cell split timers to ensure new cells don't split immediately
+        if (cellSplitTimers == null || cellSplitTimers.Length < particleCount)
+        {
+            cellSplitTimers = new float[particleCount];
+        }
+        
+        // Initialize all timers to random values between 0 and 80% of their split interval
+        // This prevents all cells from splitting simultaneously
+        for (int i = 0; i < particleCount; i++)
+        {
+            // Only set timers for cells with a valid mode
+            if (genome != null && i < activeParticleCount)
+            {
+                // Try to get the cell's mode-specific interval
+                Particle[] particleData = new Particle[1];
+                particleBuffer.GetData(particleData, 0, i, 1);
+                
+                int modeIndex = particleData[0].modeIndex;
+                if (modeIndex >= 0 && modeIndex < genome.modes.Count)
+                {
+                    float splitInterval = genome.modes[modeIndex].splitInterval;
+                    // Start with a random percentage (0-80%) of the split timer
+                    // This creates a more natural split pattern over time
+                    cellSplitTimers[i] = UnityEngine.Random.Range(0f, splitInterval * 0.8f);
+                }
+                else
+                {
+                    // Invalid mode, set timer to 0 (won't split)
+                    cellSplitTimers[i] = 0f;
+                }
+            }
+            else
+            {
+                // No valid genome, set timer to 0 (won't split)
+                cellSplitTimers[i] = 0f;
+            }
+        }
     }
 
     // Helper method to create a minimal default genome buffer
@@ -624,20 +661,31 @@ public class ParticleSystemController : MonoBehaviour
         }
         
         // Check if we can add more cells
-        int allowedSplits = maxCells - activeParticleCount;
-        if (allowedSplits <= 0) return;
+        int allowedSplits = particleCount - activeParticleCount;
+        if (allowedSplits <= 0 || genome == null || genome.modes.Count == 0) return;
         
         // Update timers and check for splits
         for (int i = 0; i < activeParticleCount; i++)
         {
             cellSplitTimers[i] += deltaTime;
             
-            // Check if it's time to split and we still have room
-            if (cellSplitTimers[i] >= globalSplitTimerMin && allowedSplits > 0)
+            // Get the particle's current mode index
+            Particle[] particleData = new Particle[1];
+            particleBuffer.GetData(particleData, 0, i, 1);
+            int modeIndex = particleData[0].modeIndex;
+            
+            // Only proceed if the mode index is valid
+            if (modeIndex >= 0 && modeIndex < genome.modes.Count)
             {
-                SplitCell(i);
-                cellSplitTimers[i] = 0f; // Reset timer
-                allowedSplits--;
+                float splitInterval = genome.modes[modeIndex].splitInterval;
+                
+                // Check if it's time to split and we still have room
+                if (cellSplitTimers[i] >= splitInterval && allowedSplits > 0)
+                {
+                    SplitCell(i);
+                    cellSplitTimers[i] = 0f; // Reset timer
+                    allowedSplits--;
+                }
             }
         }
     }
@@ -737,7 +785,7 @@ public class ParticleSystemController : MonoBehaviour
         
         foreach (var split in pendingSplits)
         {
-            if (activeParticleCount + 1 > maxCells) // Only +1 because we reuse the parent
+            if (activeParticleCount + 1 > particleCount) // Only +1 because we reuse the parent
             {
                 Debug.LogWarning("Cannot process split - reached maximum cell count");
                 break;
@@ -750,8 +798,10 @@ public class ParticleSystemController : MonoBehaviour
             cpuParticlePositions[split.parentIndex] = split.positionA;
             cpuParticleRotations[split.parentIndex] = split.rotationA;
             
-            // Set child A velocity and genome mode
+            // Set child A velocity, position, and rotation in the particle data
             particleData[split.parentIndex].velocity = (Vector3)split.velocityA;
+            particleData[split.parentIndex].position = (Vector3)split.positionA;
+            particleData[split.parentIndex].rotation = split.rotationA;
             
             // Copy parent data for Child B (with modifications)
             particleData[childB_Index] = particleData[split.parentIndex];
@@ -761,6 +811,7 @@ public class ParticleSystemController : MonoBehaviour
             cpuParticleRotations[childB_Index] = split.rotationB;
             particleData[childB_Index].velocity = (Vector3)split.velocityB;
             particleData[childB_Index].position = (Vector3)split.positionB;
+            particleData[childB_Index].rotation = split.rotationB;
             
             // Set proper genome flags based on mode
             if (genome != null && genome.modes.Count > 0)
