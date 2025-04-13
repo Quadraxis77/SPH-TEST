@@ -191,33 +191,35 @@ void ApplySPHForces(uint id : SV_DispatchThreadID)
                 {
                     float3 dir = delta / dist;
 
-                    // --- Repulsion
+                    // --- Repulsion force
                     float overlapFalloff = saturate(overlap / (effectiveRadiusA + effectiveRadiusB));
                     float falloff = saturate(1.0f - dist / (effectiveRadiusA + effectiveRadiusB));
                     float3 repulsion = dir * falloff * repulsionStrength * overlapFalloff;
                     totalForce += repulsion;
 
-                    // --- Rolling Contact Friction
-                    float3 surfaceVelA = velA + cross(omegaA, dir * effectiveRadiusA);
-                    float3 surfaceVelB = velB + cross(omegaB, -dir * effectiveRadiusB);
-                    float3 tangentialVelocity = surfaceVelA - surfaceVelB;
+                    // --- Rolling contact friction (with tangential slip test)
+                    float3 contactPointA = posA - dir * effectiveRadiusA;
+                    float3 contactPointB = posB + dir * effectiveRadiusB;
 
-                    float lenTV = length(tangentialVelocity);
-                    if (lenTV > 1e-4)
+                    float3 surfaceVelA = velA + cross(omegaA, contactPointA - posA);
+                    float3 surfaceVelB = velB + cross(omegaB, contactPointB - posB);
+                    float3 relSurfaceVel = surfaceVelA - surfaceVelB;
+
+                    float3 tangentVel = relSurfaceVel - dir * dot(relSurfaceVel, dir);
+                    float slipSpeed = length(tangentVel);
+
+                    if (slipSpeed > 1e-4)
                     {
-                        float3 frictionDir = normalize(tangentialVelocity);
+                        float3 frictionDir = tangentVel / slipSpeed;
 
-                        // 🔧 Safer pow() with abs() to avoid shader warning
-                        float torqueInput = abs(lenTV * torqueFactor);
+                        float torqueInput = abs(slipSpeed * torqueFactor);
                         float frictionMag = pow(torqueInput, 1.25);
-                        frictionMag = min(frictionMag, 10.0f); // increased from 2.0
+                        frictionMag = min(frictionMag, 10.0f);
 
-                        // 🔧 Amplify torque based on overlap depth
                         float torqueRadiusScale = pow(overlapFalloff, 2.0);
                         float effectiveRadiusTorqueA = torqueRadiusScale * effectiveRadiusA * rollingContactRadiusMultiplier;
                         float effectiveRadiusTorqueB = torqueRadiusScale * effectiveRadiusB * rollingContactRadiusMultiplier;
 
-                        // ✅ Full-strength torque — no artificial reduction
                         float3 rollingTorqueA = cross(-dir * effectiveRadiusTorqueA, -frictionDir * frictionMag);
                         float3 rollingTorqueB = cross( dir * effectiveRadiusTorqueB,  frictionDir * frictionMag);
 
@@ -239,8 +241,6 @@ void ApplySPHForces(uint id : SV_DispatchThreadID)
 
     self.velocity += linearAccel * deltaTime;
     self.angularVelocity += angularAccel * deltaTime;
-
-    // Do NOT apply torque damping here — it’s done in UpdateRotation
 
     particleBuffer[id] = self;
 }
