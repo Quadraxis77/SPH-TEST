@@ -37,12 +37,30 @@ Shader "Custom/InstancedParticles_URP"
 
                 float drag;
                 float repulsionStrength;
-                float2 padding0;
+                uint genomeFlags; // Added to match compute buffer 
+                float orientConstraintStr; // Added to match compute buffer
 
                 float4 rotation;
+                int modeIndex; // Added to match C# struct
             };
 
             StructuredBuffer<Particle> particleBuffer;
+
+            // Genome data buffer to get particle colors
+            struct GenomeAdhesionData {
+                int parentMakeAdhesion;
+                int childA_KeepAdhesion;
+                int childB_KeepAdhesion;
+                float adhesionRestLength;
+                float adhesionSpringStiffness;
+                float adhesionSpringDamping;
+                uint colorPacked;
+                float orientConstraintStrength;
+                float maxAngleDeviation;
+            };
+
+            StructuredBuffer<GenomeAdhesionData> genomeModesBuffer;
+            int defaultGenomeMode;
 
             float4 _Color;
             float _ShowDot;
@@ -60,6 +78,7 @@ Shader "Custom/InstancedParticles_URP"
                 float3 normalWS    : TEXCOORD0;
                 float3 worldPos    : TEXCOORD1;
                 float3 forwardDir  : TEXCOORD2;
+                uint instanceID    : TEXCOORD3; // Added instance ID to pass to fragment shader
             };
 
             // Rotate a vector by quaternion
@@ -89,6 +108,9 @@ Shader "Custom/InstancedParticles_URP"
 
                 // Forward Z+ axis transformed by quaternion
                 output.forwardDir = normalize(RotateVector(float3(0, 0, 1), p.rotation));
+                
+                // Pass the instance ID to the fragment shader
+                output.instanceID = input.instanceID;
 
                 return output;
             }
@@ -98,7 +120,42 @@ Shader "Custom/InstancedParticles_URP"
                 Light light = GetMainLight();
                 float3 lightDir = normalize(light.direction);
                 float NdotL = saturate(dot(input.normalWS, lightDir));
-                float3 baseColor = _Color.rgb * NdotL + 0.1;
+                
+                // Get the particle by instance ID
+                uint instanceID = input.instanceID;
+                Particle p = particleBuffer[instanceID];
+                
+                // Get the mode index from the particle's modeIndex directly
+                int modeIndex = p.modeIndex;
+                
+                // Fallback to default mode if modeIndex is invalid
+                if (modeIndex < 0 || modeIndex >= 65535) 
+                {
+                    modeIndex = defaultGenomeMode;
+                }
+                
+                // Default fallback color (green instead of purple)
+                float3 cellColor = float3(0.2, 0.8, 0.2);
+                
+                // Try to get color from genome data if available
+                if (modeIndex >= 0)
+                {
+                    // Safety check to avoid indexing out of bounds
+                    if (modeIndex < 65535) // Use a large threshold as a sanity check
+                    {
+                        GenomeAdhesionData genomeData = genomeModesBuffer[modeIndex];
+                        uint colorPacked = genomeData.colorPacked;
+                        
+                        // Unpack color (RGB format)
+                        float r = ((colorPacked >> 16) & 0xFF) / 255.0;
+                        float g = ((colorPacked >> 8) & 0xFF) / 255.0; 
+                        float b = (colorPacked & 0xFF) / 255.0;
+                        
+                        cellColor = float3(r, g, b);
+                    }
+                }
+                
+                float3 baseColor = cellColor * NdotL + 0.1; // Add ambient term
 
                 // Optional red highlight if normal faces forward direction
                 float NdotF = dot(normalize(input.normalWS), normalize(input.forwardDir));

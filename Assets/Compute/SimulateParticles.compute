@@ -1,4 +1,4 @@
-#pragma kernel ApplySpringForces
+#pragma kernel ApplyAdhesionForces
 #pragma kernel InitParticles
 #pragma kernel ClearGrid
 #pragma kernel BuildHashGrid
@@ -17,6 +17,15 @@
 #define GRID_TOTAL (GRID_DIM * GRID_DIM * GRID_DIM)
 #define TORQUE_SCALE 10000
 
+#define GENOME_HAS_ADHESION 1
+#define GENOME_MAKES_ADHESION 2
+#define GENOME_CHILD_A_KEEP_ADHESION 4
+#define GENOME_CHILD_B_KEEP_ADHESION 8
+
+float adhesionRestLength;
+float adhesionSpringStiffness;
+float adhesionSpringDamping;
+
 // ✅ 80-byte aligned Particle struct
 struct Particle {
     float3 position;            // 12
@@ -30,10 +39,28 @@ struct Particle {
 
     float  drag;                //  4
     float  repulsionStrength;   //  4
-    float2 padding0;            //  8  <-- ensures alignment
+    uint   genomeFlags;         //  4  // Bit flags: 1=has_adhesion, 2=makes_adhesion, 4=keepAdhesion_A, 8=keepAdhesion_B
+    float  orientConstraintStr; //  4  // Controls how strictly orientation is enforced (0-1)
 
     float4 rotation;            // 16
-}; // Total = 80 bytes
+    int    modeIndex;           //  4  // Added to match C# struct - stores which genome mode this particle uses
+}; // Total = 84 bytes
+
+struct GenomeAdhesionData {
+    int parentMakeAdhesion;
+    int childA_KeepAdhesion;
+    int childB_KeepAdhesion;
+    float adhesionRestLength;
+    float adhesionSpringStiffness;
+    float adhesionSpringDamping;
+    uint colorPacked;
+    float orientConstraintStrength;
+    float maxAngleDeviation;
+};
+
+StructuredBuffer<GenomeAdhesionData> genomeModesBuffer;
+int genomeModesCount;
+int defaultGenomeMode;
 
 struct DragInput {
     int selectedID;
@@ -62,6 +89,7 @@ float boundaryFriction;
 float rollingContactRadiusMultiplier;
 float density;
 float repulsionStrength;
+int activeParticleCount;
 
 uint3 GetGridCoord(float3 pos) {
     float3 gridPos = (pos + spawnRadius) / GRID_CELL_SIZE;
@@ -103,8 +131,6 @@ void InitParticles(uint id : SV_DispatchThreadID)
     p.radius = lerp(minRadius, maxRadius, frac(sin(seed * 3.456) * 999.0f));
 
     // Option for stratified sampling to reduce clumping
-    // Uncomment if you want particles to have more consistent spacing
-
     if (id > 0) {
         // Add a small repulsion from previous particles
         float repelDist = pow(0.5f * (float)id / particleBuffer.Length, 1.0f/3.0f) * spawnRadius * 0.1f;
@@ -115,16 +141,73 @@ void InitParticles(uint id : SV_DispatchThreadID)
         )) * repelDist;
     }
 
-
     float volume = (4.0f / 3.0f) * 3.1415926f * pow(p.radius, 3);
     p.mass = density * volume;
     p.momentOfInertia = (2.0f / 5.0f) * p.mass * p.radius * p.radius;
 
     p.drag = lerp(0.5f, 1.0f, frac(sin(seed * 5.6789) * 888.0f));
     p.repulsionStrength = 1.0f;
+    
+    // Initialize genome-based adhesion properties
+    uint flags = 0;
+    float orientStrength = 0.5f; // Default orientation constraint strength
+    int modeIndex = -1; // Default mode index
+    
+    // Use the genome modes if available, otherwise use default distribution
+    if (genomeModesCount > 0) {
+        // Select which genome mode to use for this particle
+        // Use defaultGenomeMode for 50% of particles, and random modes for the rest
+        if (frac(sin(seed * 78.123) * 5432.1f) < 0.5f) {
+            modeIndex = defaultGenomeMode;
+        } else {
+            modeIndex = (int)(frac(sin(seed * 43.21) * 8765.43f) * genomeModesCount);
+        }
+        
+        // Clamp the index to valid range
+        modeIndex = clamp(modeIndex, 0, genomeModesCount - 1);
+        
+        // Get genome properties from the buffer
+        GenomeAdhesionData mode = genomeModesBuffer[modeIndex];
+        
+        // Set genome flags based on mode properties
+        if (mode.parentMakeAdhesion > 0)
+            flags |= GENOME_MAKES_ADHESION;
+            
+        // All cells should be able to receive adhesion (has_adhesion)
+        flags |= GENOME_HAS_ADHESION;
+        
+        if (mode.childA_KeepAdhesion > 0)
+            flags |= GENOME_CHILD_A_KEEP_ADHESION;
+            
+        if (mode.childB_KeepAdhesion > 0)
+            flags |= GENOME_CHILD_B_KEEP_ADHESION;
+            
+        // Set orientation constraint strength from genome
+        orientStrength = mode.orientConstraintStrength;
+    }
+    else {
+        // Fallback if no genome is assigned - distribute properties randomly as before
+        uint genomeType = id % 8; 
+        
+        if (genomeType == 1 || genomeType == 3 || genomeType == 5 || genomeType == 7)
+            flags |= GENOME_HAS_ADHESION;
+        
+        if (genomeType == 2 || genomeType == 3 || genomeType == 6 || genomeType == 7)
+            flags |= GENOME_MAKES_ADHESION;
+        
+        if (genomeType == 4 || genomeType == 5)
+            flags |= GENOME_CHILD_A_KEEP_ADHESION;
+        
+        if (genomeType == 6 || genomeType == 7)
+            flags |= GENOME_CHILD_B_KEEP_ADHESION;
+    }
+    
+    p.genomeFlags = flags;
+    p.orientConstraintStr = orientStrength;
+    p.modeIndex = modeIndex;
+    
     p.angularVelocity = float3(0, 0, 0);
     p.rotation = float4(0, 0, 0, 1);
-    p.padding0 = float2(0, 0); // optional, just for safety
 
     particleBuffer[id] = p;
     torqueAccumBuffer[id] = int3(0, 0, 0);
@@ -133,7 +216,7 @@ void InitParticles(uint id : SV_DispatchThreadID)
 [numthreads(THREADS, 1, 1)]
 void BuildHashGrid(uint id : SV_DispatchThreadID)
 {
-    if (id >= (uint)particleBuffer.Length) return;
+    if (id >= (uint)particleBuffer.Length || id >= (uint)activeParticleCount) return;
     Particle p = particleBuffer[id];
     uint3 coord = GetGridCoord(p.position);
     uint hash = GridHash(coord);
@@ -148,7 +231,7 @@ void BuildHashGrid(uint id : SV_DispatchThreadID)
 [numthreads(THREADS, 1, 1)]
 void ApplySPHForces(uint id : SV_DispatchThreadID)
 {
-    if (id >= (uint)particleBuffer.Length) return;
+    if (id >= (uint)particleBuffer.Length || id >= (uint)activeParticleCount) return;
 
     Particle self = particleBuffer[id];
     float3 posA = self.position;
@@ -263,7 +346,7 @@ void ApplyDragForce(uint id : SV_DispatchThreadID)
 [numthreads(THREADS, 1, 1)]
 void UpdateMotion(uint id : SV_DispatchThreadID)
 {
-    if (id >= (uint)particleBuffer.Length) return;
+    if (id >= (uint)particleBuffer.Length || id >= (uint)activeParticleCount) return;
     Particle p = particleBuffer[id];
 
     float linearDamping = exp(-p.drag * globalDragMultiplier * deltaTime);
@@ -304,7 +387,7 @@ float4 quat_mul(float4 q1, float4 q2)
 [numthreads(THREADS, 1, 1)]
 void UpdateRotation(uint id : SV_DispatchThreadID)
 {
-    if (id >= (uint)particleBuffer.Length) return;
+    if (id >= (uint)particleBuffer.Length || id >= (uint)activeParticleCount) return;
 
     Particle p = particleBuffer[id];
     int3 iTorque = torqueAccumBuffer[id];
@@ -335,61 +418,190 @@ void UpdateRotation(uint id : SV_DispatchThreadID)
 [numthreads(THREADS, 1, 1)]
 void CopyPositionsToReadbackBuffer(uint id : SV_DispatchThreadID)
 {
-    if (id >= (uint)particleBuffer.Length) return;
+    if (id >= (uint)particleBuffer.Length || id >= (uint)activeParticleCount) return;
     positionReadbackBuffer[id] = particleBuffer[id].position;
 }
 
 [numthreads(THREADS, 1, 1)]
 void CopyRotationsToReadbackBuffer(uint id : SV_DispatchThreadID)
 {
-    if (id >= (uint)particleBuffer.Length) return;
+    if (id >= (uint)particleBuffer.Length || id >= (uint)activeParticleCount) return;
     rotationReadbackBuffer[id] = particleBuffer[id].rotation;
 }
 
-struct SpringPair {
-    uint particleA;
-    uint particleB;
-};
-
-StructuredBuffer<SpringPair> springPairBuffer;
-uint springPairCount;
-float springStiffness;
-float springDamping;
-float springRestLength;
-float springFalloff;
-
-[numthreads(64, 1, 1)]
-void ApplySpringForces(uint id : SV_DispatchThreadID)
+[numthreads(THREADS, 1, 1)]
+void ApplyAdhesionForces(uint id : SV_DispatchThreadID)
 {
-    if (id >= (uint)particleBuffer.Length) return;
+    if (id >= (uint)particleBuffer.Length || id >= (uint)activeParticleCount) return;
 
-    for (uint i = 0; i < springPairCount; i++)
+    Particle self = particleBuffer[id];
+    
+    // Only particles that have MAKES_ADHESION flag can create adhesion connections
+    if ((self.genomeFlags & GENOME_MAKES_ADHESION) == 0) return;
+    
+    float3 posA = self.position;
+    float rA = self.radius;
+    
+    // Calculate the forward direction from the quaternion
+    float3 forwardA = normalize(float3(
+        2.0f * (self.rotation.x * self.rotation.z + self.rotation.w * self.rotation.y),
+        2.0f * (self.rotation.y * self.rotation.z - self.rotation.w * self.rotation.x),
+        1.0f - 2.0f * (self.rotation.x * self.rotation.x + self.rotation.y * self.rotation.y)
+    ));
+    
+    // Calculate right and up vectors for complete orientation reference frame
+    float3 rightA = normalize(float3(
+        1.0f - 2.0f * (self.rotation.y * self.rotation.y + self.rotation.z * self.rotation.z),
+        2.0f * (self.rotation.x * self.rotation.y + self.rotation.w * self.rotation.z),
+        2.0f * (self.rotation.x * self.rotation.z - self.rotation.w * self.rotation.y)
+    ));
+    
+    float3 upA = cross(forwardA, rightA);
+    
+    uint3 baseCoord = GetGridCoord(posA);
+
+    // Use the same grid-based neighbor finding approach as in SPH
+    for (int dz = -1; dz <= 1; dz++)
+    for (int dy = -1; dy <= 1; dy++)
+    for (int dx = -1; dx <= 1; dx++)
     {
-        SpringPair pair = springPairBuffer[i];
-        if (pair.particleA == id || pair.particleB == id)
+        int3 icoord = (int3)baseCoord + int3(dx, dy, dz);
+        if (any(icoord < 0) || any(icoord >= GRID_DIM)) continue;
+
+        uint hash = GridHash(uint3(icoord));
+        uint j = gridHeads[hash];
+
+        while (j != 0xffffffff)
         {
-            uint otherID = (pair.particleA == id) ? pair.particleB : pair.particleA;
-            if (otherID >= (uint)particleBuffer.Length) continue;
-
-            Particle pA = particleBuffer[id];
-            Particle pB = particleBuffer[otherID];
-
-            float3 delta = pA.position - pB.position;
-            float dist = length(delta);
-            if (dist < 1e-5) continue;
-
-            float3 dir = delta / dist;
-            float stretch = dist - springRestLength;
-
-            float3 relVel = pA.velocity - pB.velocity;
-            float springForceMag = springStiffness * stretch;
-            float dampingForceMag = dot(relVel, dir) * springDamping;
-
-            float attenuation = exp(-springFalloff * abs(stretch));
-            float3 totalForce = -dir * (springForceMag + dampingForceMag) * attenuation;
-
-            pA.velocity += (totalForce / pA.mass) * deltaTime;
-            particleBuffer[id] = pA;
+            if (j != id)
+            {
+                Particle other = particleBuffer[j];
+                
+                // Only create adhesion with particles that have HAS_ADHESION flag
+                if ((other.genomeFlags & GENOME_HAS_ADHESION) == 0) {
+                    j = gridNext[j];
+                    continue;
+                }
+                
+                float3 posB = other.position;
+                float3 delta = posB - posA;
+                float dist = length(delta);
+                
+                // Check if within adhesion range - use adhesionRestLength as a reasonable max distance
+                float maxAdhesionDist = adhesionRestLength * 2.0f;
+                if (dist > 0.001f && dist < maxAdhesionDist)
+                {
+                    float3 dirToB = delta / dist;
+                    
+                    // Check angle condition (similar to SimulationController)
+                    float angleWithForward = degrees(acos(dot(forwardA, dirToB)));
+                    bool angleConditionMet = true;
+                    
+                    // If this is a "child" particle with keep_adhesion flags, check angle
+                    if ((self.genomeFlags & GENOME_CHILD_A_KEEP_ADHESION) != 0 || 
+                        (self.genomeFlags & GENOME_CHILD_B_KEEP_ADHESION) != 0) {
+                        // Use the 92-degree angle check from SimulationController
+                        angleConditionMet = (angleWithForward <= 92.0f);
+                    }
+                    
+                    if (angleConditionMet)
+                    {
+                        // Get max angle deviation from genome
+                        float maxAngleDeviation = 45.0f;  // Default
+                        if (genomeModesCount > 0) {
+                            int modeIndex = defaultGenomeMode;  // Use default mode for constraints
+                            maxAngleDeviation = genomeModesBuffer[modeIndex].maxAngleDeviation;
+                        }
+                        
+                        // Calculate adhesion spring force (Hooke's law)
+                        float stretch = dist - adhesionRestLength;
+                        
+                        // Get relative velocity along the adhesion direction
+                        float3 relVel = other.velocity - self.velocity;
+                        float relVelProj = dot(relVel, dirToB);
+                        
+                        // Calculate spring force with damping - pure Hooke's law formulation
+                        float springForceMag = adhesionSpringStiffness * stretch;
+                        float dampingForceMag = adhesionSpringDamping * relVelProj;
+                        
+                        // Combined force with no falloff for consistency with physical springs
+                        float3 force = dirToB * (springForceMag + dampingForceMag);
+                        
+                        // Apply forces to both particles
+                        self.velocity += (force / self.mass) * deltaTime;
+                        
+                        // --- ORIENTATION CONSTRAINT LOGIC ---
+                        
+                        // Get the particle's orientation constraint strength
+                        float orientStrength = self.orientConstraintStr;
+                        
+                        if (orientStrength > 0.0f)
+                        {
+                            // Calculate the other particle's forward direction
+                            float3 forwardB = normalize(float3(
+                                2.0f * (other.rotation.x * other.rotation.z + other.rotation.w * other.rotation.y),
+                                2.0f * (other.rotation.y * other.rotation.z - other.rotation.w * other.rotation.x),
+                                1.0f - 2.0f * (other.rotation.x * other.rotation.x + other.rotation.y * other.rotation.y)
+                            ));
+                            
+                            // Direction we want the particles to align with
+                            float3 idealForwardA = dirToB;
+                            float3 idealForwardB = -dirToB;
+                            
+                            // Calculate angular error between current and ideal orientations
+                            float errorAngleA = degrees(acos(dot(forwardA, idealForwardA)));
+                            float errorAngleB = degrees(acos(dot(forwardB, idealForwardB)));
+                            
+                            // Only apply constraint if angle exceeds the allowed deviation
+                            if (errorAngleA > maxAngleDeviation)
+                            {
+                                // Calculate torque to align with ideal direction
+                                float3 torqueAxis = cross(forwardA, idealForwardA);
+                                if (length(torqueAxis) > 0.0001f)
+                                {
+                                    torqueAxis = normalize(torqueAxis);
+                                    // Scale torque by orientation constraint strength and angular error
+                                    float torqueMagnitude = (errorAngleA - maxAngleDeviation) * orientStrength * 0.1f;
+                                    float3 correctionTorque = torqueAxis * torqueMagnitude;
+                                    
+                                    // Apply the torque
+                                    self.angularVelocity += correctionTorque * deltaTime;
+                                }
+                            }
+                            
+                            // Apply orientation constraint to other particle too
+                            if (errorAngleB > maxAngleDeviation)
+                            {
+                                // Calculate torque to align other particle with ideal direction
+                                float3 torqueAxis = cross(forwardB, idealForwardB);
+                                if (length(torqueAxis) > 0.0001f)
+                                {
+                                    torqueAxis = normalize(torqueAxis);
+                                    // Scale torque by orientation constraint strength and angular error
+                                    float torqueMagnitude = (errorAngleB - maxAngleDeviation) * other.orientConstraintStr * 0.1f;
+                                    float3 correctionTorque = torqueAxis * torqueMagnitude;
+                                    
+                                    // Get reference to other particle for updating
+                                    Particle updatedOther = other;
+                                    updatedOther.angularVelocity += correctionTorque * deltaTime;
+                                    
+                                    // Write back changes to the other particle
+                                    particleBuffer[j] = updatedOther;
+                                }
+                            }
+                        }
+                        
+                        // Update other particle's velocity
+                        Particle updated = particleBuffer[j]; // Re-read in case it was modified by orientation logic
+                        updated.velocity -= (force / updated.mass) * deltaTime;
+                        particleBuffer[j] = updated;
+                    }
+                }
+            }
+            j = gridNext[j];
         }
     }
+    
+    // Write back the updated particle
+    particleBuffer[id] = self;
 }

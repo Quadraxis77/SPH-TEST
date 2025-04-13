@@ -495,8 +495,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 78bbef6110a0bfa46a070f1e641480f4, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  particleCount: 2000
-  minRadius: 1
+  particleCount: 10000
+  minRadius: 2
   maxRadius: 2
   spawnRadius: 15
   globalDragMultiplier: 5
@@ -505,9 +505,17 @@ MonoBehaviour:
   boundaryFriction: 0.8
   rollingContactRadiusMultiplier: 10
   density: 0.1
+  repulsionStrength: 200
+  springStiffness: 100
+  springDamping: 5
+  springRestLength: 3
+  springFalloff: 0.5
+  springPairs: []
   computeShader: {fileID: 7200000, guid: 64854060aaa67294e9c621f53f2fb7d1, type: 3}
   sphereMaterial: {fileID: 2100000, guid: 76c72821aa5d0fb45a7a2362aa24f1a2, type: 2}
   sphereMesh: {fileID: 10207, guid: 0000000000000000e000000000000000, type: 0}
+  dragCircleColor: {r: 1, g: 0.51122946, b: 0, a: 1}
+  dragCircleRadius: 1
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0
