@@ -37,6 +37,13 @@ public class ParticleSystemController : MonoBehaviour
     public Material sphereMaterial;
     public Mesh sphereMesh;
 
+    [Header("Drag Visualization Settings")]
+    public Color dragCircleColor = Color.green;
+    public float dragCircleRadius = 1.0f;
+
+    private LineRenderer circleRenderer;
+    private LineRenderer lineRenderer;
+
     ComputeBuffer particleBuffer, dragInputBuffer, drawArgsBufferSpheres;
     ComputeBuffer positionReadbackBuffer, rotationReadbackBuffer;
     ComputeBuffer gridHeads, gridNext, gridParticleIndices;
@@ -130,6 +137,26 @@ public class ParticleSystemController : MonoBehaviour
             0
         };
         drawArgsBufferSpheres.SetData(args);
+
+        // Initialize LineRenderers
+        GameObject circleObject = new GameObject("DragCircle");
+        circleRenderer = circleObject.AddComponent<LineRenderer>();
+        circleRenderer.startWidth = 0.02f;
+        circleRenderer.endWidth = 0.02f;
+        circleRenderer.loop = true;
+        circleRenderer.positionCount = 36;
+        circleRenderer.material = new Material(Shader.Find("Sprites/Default"));
+        circleRenderer.material.color = dragCircleColor;
+        circleRenderer.enabled = false;
+
+        GameObject lineObject = new GameObject("DragLine");
+        lineRenderer = lineObject.AddComponent<LineRenderer>();
+        lineRenderer.startWidth = 0.02f;
+        lineRenderer.endWidth = 0.02f;
+        lineRenderer.positionCount = 2;
+        lineRenderer.material = new Material(Shader.Find("Sprites/Default"));
+        lineRenderer.material.color = dragCircleColor;
+        lineRenderer.enabled = false;
     }
 
     void Update()
@@ -223,6 +250,37 @@ public class ParticleSystemController : MonoBehaviour
             sphereMesh, 0, sphereMaterial,
             new Bounds(Vector3.zero, Vector3.one * spawnRadius * 2f),
             drawArgsBufferSpheres);
+
+        UpdateDragVisualization();
+    }
+
+    private void UpdateDragVisualization()
+    {
+        if (selectedParticleID != -1)
+        {
+            // Update circle
+            Vector3 cameraForward = Camera.main.transform.forward;
+            Vector3 cameraRight = Camera.main.transform.right;
+            Vector3 cameraUp = Vector3.Cross(cameraForward, cameraRight);
+
+            for (int i = 0; i < 36; i++)
+            {
+                float angle = Mathf.Deg2Rad * (i * 10);
+                Vector3 point = dragTargetWorld + (Mathf.Cos(angle) * cameraRight + Mathf.Sin(angle) * cameraUp) * dragCircleRadius;
+                circleRenderer.SetPosition(i, point);
+            }
+            circleRenderer.enabled = true;
+
+            // Update line
+            lineRenderer.SetPosition(0, cpuParticlePositions[selectedParticleID]);
+            lineRenderer.SetPosition(1, dragTargetWorld);
+            lineRenderer.enabled = true;
+        }
+        else
+        {
+            circleRenderer.enabled = false;
+            lineRenderer.enabled = false;
+        }
     }
 
     void HandleMouseDrag()
@@ -268,7 +326,13 @@ public class ParticleSystemController : MonoBehaviour
             Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
             Plane dragPlane = new Plane(-Camera.main.transform.forward, cpuParticlePositions[selectedParticleID]);
             if (dragPlane.Raycast(ray, out float dist))
+            {
                 dragTargetWorld = ray.origin + ray.direction * dist;
+
+                // Maintain the same distance from the camera
+                Vector3 cameraToParticle = dragTargetWorld - Camera.main.transform.position;
+                dragTargetWorld = Camera.main.transform.position + cameraToParticle.normalized * cameraToParticle.magnitude;
+            }
         }
 
         if (Input.GetMouseButtonUp(0))
@@ -297,5 +361,8 @@ public class ParticleSystemController : MonoBehaviour
         gridParticleIndices?.Release();
         torqueAccumBuffer?.Release();
         springPairBuffer?.Release();
+
+        if (circleRenderer != null) Destroy(circleRenderer.gameObject);
+        if (lineRenderer != null) Destroy(lineRenderer.gameObject);
     }
 }
