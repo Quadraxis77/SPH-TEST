@@ -69,6 +69,8 @@ public class ParticleSystemController : MonoBehaviour
     Vector3[] cpuParticlePositions;
     Quaternion[] cpuParticleRotations;
 
+    private float currentDragDistance;
+
     struct DragInput
     {
         public int selectedID;
@@ -318,21 +320,19 @@ public class ParticleSystemController : MonoBehaviour
             {
                 selectedParticleID = closestID;
                 dragTargetWorld = hitPoint;
+                
+                // Store the initial distance from camera to dragged particle
+                currentDragDistance = Vector3.Distance(Camera.main.transform.position, dragTargetWorld);
             }
         }
 
         if (Input.GetMouseButton(0) && selectedParticleID != -1)
         {
+            // Project the mouse position to world space at the initially captured distance
             Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
-            Plane dragPlane = new Plane(-Camera.main.transform.forward, cpuParticlePositions[selectedParticleID]);
-            if (dragPlane.Raycast(ray, out float dist))
-            {
-                dragTargetWorld = ray.origin + ray.direction * dist;
-
-                // Maintain the same distance from the camera
-                Vector3 cameraToParticle = dragTargetWorld - Camera.main.transform.position;
-                dragTargetWorld = Camera.main.transform.position + cameraToParticle.normalized * cameraToParticle.magnitude;
-            }
+            
+            // Set the drag target at the same distance from the camera as when initially clicked
+            dragTargetWorld = Camera.main.transform.position + ray.direction * currentDragDistance;
         }
 
         if (Input.GetMouseButtonUp(0))
