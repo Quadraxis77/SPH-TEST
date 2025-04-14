@@ -1,5 +1,6 @@
 using UnityEngine;
 using System.Collections.Generic;
+using UnityEngine.Rendering;  // Add this for AsyncGPUReadback
 
 public class ParticleSystemController : MonoBehaviour
 {
@@ -114,6 +115,13 @@ public class ParticleSystemController : MonoBehaviour
         public int modeIndex; // Added field to store the mode index
     }
 
+    // Add member variables to track readback requests
+    private bool particleDataReadbackInProgress = false;
+    private Particle[] cachedParticleData;
+    
+    // Add a flag to track if our cached particle data is ready/valid
+    private bool cachedParticleDataValid = false;
+
     void Start()
     {
         Application.targetFrameRate = 144;
@@ -135,6 +143,9 @@ public class ParticleSystemController : MonoBehaviour
     {
         float dt = Time.deltaTime;
         int threadGroups = Mathf.CeilToInt(particleCount / 64f);
+
+        // Request asynchronous readback of particle data if needed
+        RequestParticleDataAsync();
 
         // Update cell split timers and handle cell division
         UpdateCellDivisionTimers(dt);
@@ -204,9 +215,10 @@ public class ParticleSystemController : MonoBehaviour
         computeShader.SetBuffer(kernelCopyRotations, "rotationReadbackBuffer", rotationReadbackBuffer);
         computeShader.Dispatch(kernelCopyRotations, threadGroups, 1, 1);
 
-        positionReadbackBuffer.GetData(cpuParticlePositions);
-        rotationReadbackBuffer.GetData(cpuParticleRotations);
-
+        // Don't do synchronous readbacks here anymore
+        // Instead, use the cached results from the last async readback
+        // We'll still need these for visualization
+        
         uint[] args = new uint[5];
         drawArgsBufferSpheres.GetData(args);
         args[1] = (uint)activeParticleCount; // Use activeParticleCount instead of total count
@@ -664,32 +676,41 @@ public class ParticleSystemController : MonoBehaviour
         int allowedSplits = particleCount - activeParticleCount;
         if (allowedSplits <= 0 || genome == null || genome.modes.Count == 0) return;
         
-        // Update timers and check for splits
+        // Always update timers whether or not we have valid cached data
         for (int i = 0; i < activeParticleCount; i++)
         {
             cellSplitTimers[i] += deltaTime;
-            
-            // Get the particle's current mode index
-            Particle[] particleData = new Particle[1];
-            particleBuffer.GetData(particleData, 0, i, 1);
-            int modeIndex = particleData[0].modeIndex;
-            
-            // Only proceed if the mode index is valid
-            if (modeIndex >= 0 && modeIndex < genome.modes.Count)
+        }
+        
+        // Only attempt to split cells if we have valid particle data
+        if (cachedParticleDataValid)
+        {
+            // Update timers and check for splits
+            for (int i = 0; i < activeParticleCount; i++)
             {
-                float splitInterval = genome.modes[modeIndex].splitInterval;
+                // Get the particle's current mode index from our async cached data
+                int modeIndex = cachedParticleData[i].modeIndex;
                 
-                // Check if it's time to split and we still have room
-                if (cellSplitTimers[i] >= splitInterval && allowedSplits > 0)
+                // Only proceed if the mode index is valid
+                if (modeIndex >= 0 && modeIndex < genome.modes.Count)
                 {
-                    SplitCell(i);
-                    cellSplitTimers[i] = 0f; // Reset timer
-                    allowedSplits--;
+                    float splitInterval = genome.modes[modeIndex].splitInterval;
+                    
+                    // Check if it's time to split and we still have room
+                    if (cellSplitTimers[i] >= splitInterval && allowedSplits > 0)
+                    {
+                        SplitCell(i);
+                        cellSplitTimers[i] = 0f; // Reset timer
+                        allowedSplits--;
+                    }
                 }
             }
+            
+            // Mark the cached data as invalid so we'll request a new readback next frame
+            cachedParticleDataValid = false;
         }
     }
-    
+
     // Handle particle cell division
     private void SplitCell(int parentIndex)
     {
@@ -881,5 +902,56 @@ public class ParticleSystemController : MonoBehaviour
     private Vector3 GetDirection(float yaw, float pitch)
     {
         return Quaternion.Euler(pitch, yaw, 0f) * Vector3.forward;
+    }
+
+    // Request particle data using AsyncGPUReadback
+    private void RequestParticleDataAsync()
+    {
+        // Only start a new request if we don't have one in progress
+        if (!particleDataReadbackInProgress && !cachedParticleDataValid)
+        {
+            particleDataReadbackInProgress = true;
+            
+            // Request particle data asynchronously for mode index requirements
+            AsyncGPUReadback.Request(particleBuffer, r => 
+            {
+                if (r.hasError)
+                {
+                    Debug.LogError("AsyncGPUReadback error: Failed to read particle data");
+                    particleDataReadbackInProgress = false;
+                    return;
+                }
+                
+                // Copy the data to our cache
+                if (cachedParticleData == null || cachedParticleData.Length < activeParticleCount)
+                {
+                    cachedParticleData = new Particle[particleCount];
+                }
+                
+                // Copy data from the result to our cache
+                r.GetData<Particle>().CopyTo(cachedParticleData);
+                
+                // Mark our cached data as valid and readback as complete
+                cachedParticleDataValid = true;
+                particleDataReadbackInProgress = false;
+            });
+        }
+        
+        // Also request position and rotation data asynchronously for visualization
+        AsyncGPUReadback.Request(positionReadbackBuffer, r => 
+        {
+            if (!r.hasError)
+            {
+                r.GetData<Vector3>().CopyTo(cpuParticlePositions);
+            }
+        });
+        
+        AsyncGPUReadback.Request(rotationReadbackBuffer, r => 
+        {
+            if (!r.hasError)
+            {
+                r.GetData<Quaternion>().CopyTo(cpuParticleRotations);
+            }
+        });
     }
 }
