@@ -20,6 +20,23 @@ public class CellGenome : ScriptableObject
     }
 
     /// <summary>
+    /// Checks if more than one mode is marked as initial and returns a list of all initial modes.
+    /// </summary>
+    /// <returns>A list of indices for all modes marked as initial</returns>
+    public List<int> GetInitialModes()
+    {
+        List<int> initialModes = new List<int>();
+        for (int i = 0; i < modes.Count; i++)
+        {
+            if (modes[i].isInitial)
+            {
+                initialModes.Add(i);
+            }
+        }
+        return initialModes;
+    }
+
+    /// <summary>
     /// Ensures only one mode is marked as initial.
     /// If multiple modes are marked, only the first is kept.
     /// If none are marked, the first mode is set as initial.
@@ -49,11 +66,37 @@ public class CellGenome : ScriptableObject
         }
     }
 
+    /// <summary>
+    /// Validates that the genome configuration is valid for simulation.
+    /// Throws an error if multiple initial modes are detected at runtime.
+    /// </summary>
+    public void ValidateForSimulation()
+    {
+        List<int> initialModes = GetInitialModes();
+        
+        if (initialModes.Count == 0 && modes.Count > 0)
+        {
+            // If no initial modes, set the first one
+            modes[0].isInitial = true;
+            Debug.LogWarning("No initial mode was set. Setting the first mode as initial.");
+        }
+        else if (initialModes.Count > 1)
+        {
+            // Multiple initial modes detected at runtime - throw an error
+            string modeList = string.Join(", ", initialModes.ConvertAll(idx => $"'{modes[idx].modeName}'"));
+            throw new System.InvalidOperationException(
+                $"Multiple initial modes detected: {modeList}. Only one mode can be marked as initial during simulation.");
+        }
+    }
+
     void OnValidate()
     {
         Debug.Log("[OnValidate] Validating genome and refreshing mode indexes.");
         RefreshModeIndexes();
-        EnforceSingleInitialMode();
+
+        // Don't enforce any initial mode requirements in the editor
+        // This allows all modes, including the first one, to be unchecked
+
         if (Application.isPlaying)
         {
             Debug.Log("[OnValidate] Invoking OnGenomeChanged event.");
@@ -69,7 +112,12 @@ public class CellGenome : ScriptableObject
     {
         Debug.Log("[TriggerGenomeChanged] Manually triggering genome changed event");
         RefreshModeIndexes();
-        EnforceSingleInitialMode();
+        
+        // Only validate for simulation if we're in play mode
+        if (Application.isPlaying)
+        {
+            ValidateForSimulation();
+        }
         
         // Invoke the event directly
         OnGenomeChanged?.Invoke();
@@ -84,6 +132,7 @@ public class GenomeMode
     [Range(1f, 15f)] public float splitInterval = 5f;
     
     // New flag: only one mode should be marked as initial.
+    [SerializeField]
     public bool isInitial = false;
     public bool parentMakeAdhesion = false;
     

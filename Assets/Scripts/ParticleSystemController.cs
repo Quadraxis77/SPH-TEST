@@ -129,6 +129,18 @@ public class ParticleSystemController : MonoBehaviour
         // Subscribe to genome changes
         if (genome != null)
         {
+            // Validate the genome configuration before starting the simulation
+            try
+            {
+                genome.ValidateForSimulation();
+            }
+            catch (System.InvalidOperationException ex)
+            {
+                Debug.LogError($"Error in genome configuration: {ex.Message}");
+                enabled = false; // Disable this component to prevent the simulation from running
+                return;
+            }
+            
             CellGenome.OnGenomeChanged += OnGenomeChanged;
         }
 
@@ -521,6 +533,31 @@ public class ParticleSystemController : MonoBehaviour
         computeShader.SetBuffer(kernelInitParticles, "particleBuffer", particleBuffer);
         computeShader.SetBuffer(kernelInitParticles, "torqueAccumBuffer", torqueAccumBuffer);
         computeShader.Dispatch(kernelInitParticles, Mathf.CeilToInt(particleCount / 64f), 1, 1);
+        
+        // Explicitly set the initial mode for the first particle
+        if (genome != null && genome.modes.Count > 0)
+        {
+            int initialModeIndex = GetInitialModeIndex();
+            // Get the data for the first particle, set its mode index, and write it back
+            Particle[] firstParticle = new Particle[1];
+            particleBuffer.GetData(firstParticle, 0, 0, 1);
+            firstParticle[0].modeIndex = initialModeIndex;
+            
+            // Set the genome flags based on the initial mode
+            GenomeMode initialMode = genome.modes[initialModeIndex];
+            uint flags = 0;
+            
+            if (initialMode.parentMakeAdhesion)
+                flags |= 2; // GENOME_MAKES_ADHESION
+                
+            flags |= 1; // GENOME_HAS_ADHESION (all cells can receive adhesion)
+            
+            firstParticle[0].genomeFlags = flags;
+            firstParticle[0].orientConstraintStr = initialMode.orientationConstraintStrength;
+            
+            // Write the updated particle data back to the buffer
+            particleBuffer.SetData(firstParticle, 0, 0, 1);
+        }
         
         // Initialize cell split timers to ensure new cells don't split immediately
         if (cellSplitTimers == null || cellSplitTimers.Length < particleCount)
