@@ -110,36 +110,45 @@ void ClearGrid(uint id : SV_DispatchThreadID)
 [numthreads(THREADS, 1, 1)]
 void InitParticles(uint id : SV_DispatchThreadID)
 {
-    if (id >= (uint)particleBuffer.Length) return;
+    if (id >= (uint)particleBuffer.Length || id >= (uint)activeParticleCount) return;
 
     uint seed = id * 65537 + 17;
     
-    // Generate random direction (same as before)
-    float3 dir = normalize(float3(
-        frac(sin(seed * 12.9898) * 43758.5453) * 2 - 1,
-        frac(sin(seed * 78.233) * 43758.5453) * 2 - 1,
-        frac(sin(seed * 91.934) * 43758.5453) * 2 - 1
-    ));
-    
-    // Improved radial distribution: apply cube root to get uniform volume distribution
-    float randVal = frac(sin(seed * 1.2345) * 10000.0f);
-    float dist = pow(randVal, 1.0f/3.0f) * spawnRadius;
-
     Particle p;
-    p.position = dir * dist;
+    
+    // Special case for particle 0 (the first one) - place it at the center
+    if (id == 0) {
+        p.position = float3(0, 0, 0); // Center position
+    } 
+    else {
+        // For all other particles, use the existing random distribution logic
+        // Generate random direction
+        float3 dir = normalize(float3(
+            frac(sin(seed * 12.9898) * 43758.5453) * 2 - 1,
+            frac(sin(seed * 78.233) * 43758.5453) * 2 - 1,
+            frac(sin(seed * 91.934) * 43758.5453) * 2 - 1
+        ));
+        
+        // Improved radial distribution: apply cube root to get uniform volume distribution
+        float randVal = frac(sin(seed * 1.2345) * 10000.0f);
+        float dist = pow(randVal, 1.0f/3.0f) * spawnRadius;
+        
+        p.position = dir * dist;
+        
+        // Option for stratified sampling to reduce clumping
+        if (id > 1) {
+            // Add a small repulsion from previous particles
+            float repelDist = pow(0.5f * (float)id / particleBuffer.Length, 1.0f/3.0f) * spawnRadius * 0.1f;
+            p.position += normalize(float3(
+                frac(sin(seed * 45.678) * 43758.5453) * 2 - 1,
+                frac(sin(seed * 67.890) * 43758.5453) * 2 - 1,
+                frac(sin(seed * 12.345) * 43758.5453) * 2 - 1
+            )) * repelDist;
+        }
+    }
+    
     p.velocity = float3(0, 0, 0);
     p.radius = lerp(minRadius, maxRadius, frac(sin(seed * 3.456) * 999.0f));
-
-    // Option for stratified sampling to reduce clumping
-    if (id > 0) {
-        // Add a small repulsion from previous particles
-        float repelDist = pow(0.5f * (float)id / particleBuffer.Length, 1.0f/3.0f) * spawnRadius * 0.1f;
-        p.position += normalize(float3(
-            frac(sin(seed * 45.678) * 43758.5453) * 2 - 1,
-            frac(sin(seed * 67.890) * 43758.5453) * 2 - 1,
-            frac(sin(seed * 12.345) * 43758.5453) * 2 - 1
-        )) * repelDist;
-    }
 
     float volume = (4.0f / 3.0f) * 3.1415926f * pow(p.radius, 3);
     p.mass = density * volume;

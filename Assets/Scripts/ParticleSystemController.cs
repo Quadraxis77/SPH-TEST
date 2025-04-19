@@ -289,8 +289,7 @@ public class ParticleSystemController : MonoBehaviour
             Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
             float closestDist = Mathf.Infinity;
             int closestID = -1;
-            Vector3 hitPoint = Vector3.zero;
-
+            
             for (int i = 0; i < cpuParticlePositions.Length; i++)
             {
                 Vector3 center = cpuParticlePositions[i];
@@ -308,7 +307,7 @@ public class ParticleSystemController : MonoBehaviour
                     {
                         closestID = i;
                         closestDist = t;
-                        hitPoint = ray.origin + ray.direction * t;
+                        // We don't need hitPoint anymore as we'll use the particle center
                     }
                 }
             }
@@ -316,9 +315,10 @@ public class ParticleSystemController : MonoBehaviour
             if (closestID != -1)
             {
                 selectedParticleID = closestID;
-                dragTargetWorld = hitPoint;
+                // Use the center of the particle instead of the hit point
+                dragTargetWorld = cpuParticlePositions[selectedParticleID];
                 
-                // Store the initial distance from camera to dragged particle
+                // Store the initial distance from camera to particle center
                 currentDragDistance = Vector3.Distance(Camera.main.transform.position, dragTargetWorld);
             }
         }
@@ -713,37 +713,63 @@ public class ParticleSystemController : MonoBehaviour
         int allowedSplits = particleCount - activeParticleCount;
         if (allowedSplits <= 0 || genome == null || genome.modes.Count == 0) return;
         
-        // Always update timers whether or not we have valid cached data
+        // Always update timers for all active particles
         for (int i = 0; i < activeParticleCount; i++)
         {
             cellSplitTimers[i] += deltaTime;
         }
         
-        // Only attempt to split cells if we have valid particle data
-        if (cachedParticleDataValid)
+        // For low split intervals (like 1.0), we need to be more careful about floating point comparisons
+        const float epsilon = 0.001f;
+
+        // Handle all particles - use direct buffer access for the first particle if we don't have valid cached data
+        for (int i = 0; i < activeParticleCount; i++)
         {
-            // Update timers and check for splits
-            for (int i = 0; i < activeParticleCount; i++)
+            // Get mode index either from cache or directly from buffer for first particle
+            int modeIndex;
+            
+            if (cachedParticleDataValid)
             {
-                // Get the particle's current mode index from our async cached data
-                int modeIndex = cachedParticleData[i].modeIndex;
+                modeIndex = cachedParticleData[i].modeIndex;
+            }
+            else if (i == 0) // Special case for first particle when cache isn't valid
+            {
+                // For first particle, we can read directly from the buffer
+                Particle[] particleData = new Particle[1];
+                particleBuffer.GetData(particleData, 0, 0, 1);
+                modeIndex = particleData[0].modeIndex;
                 
-                // Only proceed if the mode index is valid
-                if (modeIndex >= 0 && modeIndex < genome.modes.Count)
+                // If somehow the mode is invalid, use initial mode
+                if (modeIndex < 0 || modeIndex >= genome.modes.Count)
                 {
-                    float splitInterval = genome.modes[modeIndex].splitInterval;
-                    
-                    // Check if it's time to split and we still have room
-                    if (cellSplitTimers[i] >= splitInterval && allowedSplits > 0)
-                    {
-                        SplitCell(i);
-                        cellSplitTimers[i] = 0f; // Reset timer
-                        allowedSplits--;
-                    }
+                    modeIndex = GetInitialModeIndex();
                 }
             }
+            else
+            {
+                // For other particles, if we don't have cached data, skip for now
+                continue;
+            }
             
-            // Mark the cached data as invalid so we'll request a new readback next frame
+            // Only proceed if the mode index is valid
+            if (modeIndex >= 0 && modeIndex < genome.modes.Count)
+            {
+                float splitInterval = genome.modes[modeIndex].splitInterval;
+                
+                // Check if it's time to split - use a small epsilon to handle floating-point issues
+                if (cellSplitTimers[i] >= splitInterval - epsilon && allowedSplits > 0)
+                {
+                    SplitCell(i);
+                    cellSplitTimers[i] = 0f; // Reset timer
+                    allowedSplits--;
+                }
+            }
+        }
+        
+        // Mark the cached data as invalid so we'll request a new readback next frame
+        // Only do this if we actually used the cached data
+        if (cachedParticleDataValid)
+        {
             cachedParticleDataValid = false;
         }
     }
