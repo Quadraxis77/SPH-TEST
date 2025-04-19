@@ -242,6 +242,8 @@ public class ParticleSystemController : MonoBehaviour
         drawArgsBufferSpheres.SetData(args);
 
         sphereMaterial.SetBuffer("particleBuffer", particleBuffer);
+        // Ensure GPU instancing is enabled on the material for per-instance properties
+        sphereMaterial.enableInstancing = true;
         
         Graphics.DrawMeshInstancedIndirect(
             sphereMesh, 0, sphereMaterial,
@@ -754,15 +756,17 @@ public class ParticleSystemController : MonoBehaviour
                 break;
             }
 
-            int childB_Index = activeParticleCount;
             int parentIndex = split.parentIndex;
-
-            // Remove any old adhesion connections for this parent only
+            // remember old parent position and existing connections
+            Vector3 oldParentPos = cpuParticlePositions[parentIndex];
+            List<int> connectedNeighbors = FindConnectedParticles(parentIndex);
+            // remove all old connections for parent
             RemoveAdhesionConnectionsForParticle(parentIndex);
 
+            int childB_Index = activeParticleCount;
+            // update parent and child B data
             cpuParticlePositions[parentIndex] = split.positionA;
             cpuParticleRotations[parentIndex] = split.rotationA;
-
             particleData[parentIndex].velocity = split.velocityA;
             particleData[parentIndex].position = split.positionA;
             particleData[parentIndex].rotation = split.rotationA;
@@ -775,18 +779,46 @@ public class ParticleSystemController : MonoBehaviour
             particleData[childB_Index].rotation = split.rotationB;
 
             GenomeMode parentMode = null;
+            GenomeMode childAMode = null;
+            GenomeMode childBMode = null;
+            int childAModeIndex = split.childAModeIndex;
+            int childBModeIndex = split.childBModeIndex;
+
             if (genome != null && genome.modes.Count > 0)
             {
                 int parentModeIndex = particleData[parentIndex].modeIndex;
                 if (parentModeIndex >= 0 && parentModeIndex < genome.modes.Count)
-                {
                     parentMode = genome.modes[parentModeIndex];
+
+                if (childAModeIndex >= 0 && childAModeIndex < genome.modes.Count)
+                {
+                    particleData[parentIndex].modeIndex = childAModeIndex;
+                    childAMode = genome.modes[childAModeIndex];
+                }
+                if (childBModeIndex >= 0 && childBModeIndex < genome.modes.Count)
+                {
+                    particleData[childB_Index].modeIndex = childBModeIndex;
+                    childBMode = genome.modes[childBModeIndex];
                 }
 
-                // Only make sibling adhesion
+                // create sibling adhesion
                 if (parentMode != null && parentMode.parentMakeAdhesion)
-                {
                     CreateAdhesionConnection(parentIndex, childB_Index, parentMode);
+
+                // apply keep adhesion from parent to children
+                foreach (int neighbor in connectedNeighbors)
+                {
+                    Vector3 neighborDir = cpuParticlePositions[neighbor] - oldParentPos;
+                    Vector3 aDir = split.positionA - oldParentPos;
+                    Vector3 bDir = split.positionB - oldParentPos;
+
+                    float angleA = Vector3.Angle(neighborDir, aDir);
+                    float angleB = Vector3.Angle(neighborDir, bDir);
+
+                    if (childAMode != null && childAMode.childA_KeepAdhesion && angleA <= 94f && !ConnectionExists(parentIndex, neighbor))
+                        CreateAdhesionConnection(parentIndex, neighbor, childAMode);
+                    if (childBMode != null && childBMode.childB_KeepAdhesion && angleB <= 94f && !ConnectionExists(childB_Index, neighbor))
+                        CreateAdhesionConnection(childB_Index, neighbor, childBMode);
                 }
             }
 
@@ -797,6 +829,37 @@ public class ParticleSystemController : MonoBehaviour
 
         particleBuffer.SetData(particleData);
         pendingSplits.Clear();
+    }
+
+    // Helper to find connected particles on CPU
+    private List<int> FindConnectedParticles(int index)
+    {
+        var list = new List<int>();
+        foreach (var conn in adhesionConnections)
+        {
+            if (conn.particleA == index)
+                list.Add(conn.particleB);
+            else if (conn.particleB == index)
+                list.Add(conn.particleA);
+        }
+        return list;
+    }
+
+    // Remove all connections involving a specific particle
+    private void RemoveAdhesionConnectionsForParticle(int index)
+    {
+        adhesionConnections.RemoveAll(c => c.particleA == index || c.particleB == index);
+    }
+
+    // Check if a connection already exists
+    private bool ConnectionExists(int a, int b)
+    {
+        foreach (var c in adhesionConnections)
+        {
+            if ((c.particleA == a && c.particleB == b) || (c.particleA == b && c.particleB == a))
+                return true;
+        }
+        return false;
     }
 
     private Vector3 GetDirection(float yaw, float pitch)
@@ -919,11 +982,5 @@ public class ParticleSystemController : MonoBehaviour
         };
         adhesionConnections.Add(adhesion);
         Debug.Log($"Created adhesion connection between particles {particleA} and {particleB}");
-    }
-
-    private void RemoveAdhesionConnectionsForParticle(int particleIndex)
-    {
-        // Remove all adhesion connections involving the specified particle
-        adhesionConnections.RemoveAll(c => c.particleA == particleIndex || c.particleB == particleIndex);
     }
 }
