@@ -36,10 +36,24 @@ struct Particle {
     int    modeIndex;           //  4  // Keep mode index for color/visualization
 }; // Total = 84 bytes
 
+// Adhesion connection struct for compute shader
+struct AdhesionConnection {
+    int particleA;
+    int particleB;
+    float restLength;
+    float springStiffness;
+    float springDamping;
+    float4 connectionColor; // RGBA
+};
+
 // Simplified data struct without adhesion properties
 struct GenomeData {
     uint colorPacked;
 };
+
+// Buffer for adhesion connections
+StructuredBuffer<AdhesionConnection> adhesionConnectionBuffer;
+int adhesionConnectionCount;
 
 StructuredBuffer<GenomeData> genomeModesBuffer;
 int genomeModesCount;
