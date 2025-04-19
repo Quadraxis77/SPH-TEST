@@ -43,7 +43,6 @@ public class ParticleSystemController : MonoBehaviour
     ComputeBuffer positionReadbackBuffer, rotationReadbackBuffer;
     ComputeBuffer gridHeads, gridNext, gridParticleIndices;
     ComputeBuffer torqueAccumBuffer;
-    ComputeBuffer genomeModesBuffer; // Add persistent genomeModesBuffer
 
     const int GRID_DIM = 32;
     const int GRID_TOTAL = GRID_DIM * GRID_DIM * GRID_DIM;
@@ -52,7 +51,6 @@ public class ParticleSystemController : MonoBehaviour
     int kernelClearGrid;
     int kernelBuildGrid;
     int kernelApplySPHForces;
-    int kernelApplyAdhesionForces;
     int kernelApplyDrag;
     int kernelUpdateMotion;
     int kernelUpdateRotation;
@@ -172,8 +170,6 @@ public class ParticleSystemController : MonoBehaviour
         computeShader.SetFloat("repulsionStrength", repulsionStrength);
         computeShader.SetInt("activeParticleCount", activeParticleCount); // Make sure to set this every frame
         
-        // No need to set adhesion parameters here as they come from the genome
-
         torqueAccumBuffer.SetData(new int[particleCount * 3]);
 
         uint[] clear = new uint[GRID_TOTAL];
@@ -195,18 +191,6 @@ public class ParticleSystemController : MonoBehaviour
         computeShader.SetBuffer(kernelApplySPHForces, "torqueAccumBuffer", torqueAccumBuffer);
         computeShader.Dispatch(kernelApplySPHForces, threadGroups, 1, 1);
 
-        computeShader.SetBuffer(kernelApplyAdhesionForces, "particleBuffer", particleBuffer);
-        computeShader.SetBuffer(kernelApplyAdhesionForces, "gridHeads", gridHeads);
-        computeShader.SetBuffer(kernelApplyAdhesionForces, "gridNext", gridNext);
-        computeShader.SetBuffer(kernelApplyAdhesionForces, "gridParticleIndices", gridParticleIndices);
-        computeShader.SetBuffer(kernelApplyAdhesionForces, "torqueAccumBuffer", torqueAccumBuffer);
-        // Only set the genomeModesBuffer if it's not null
-        if (genomeModesBuffer != null)
-        {
-            computeShader.SetBuffer(kernelApplyAdhesionForces, "genomeModesBuffer", genomeModesBuffer);
-        }
-        computeShader.Dispatch(kernelApplyAdhesionForces, threadGroups, 1, 1);
-
         computeShader.SetBuffer(kernelApplyDrag, "particleBuffer", particleBuffer);
         computeShader.SetBuffer(kernelApplyDrag, "dragInput", dragInputBuffer);
         HandleMouseDrag();
@@ -227,23 +211,12 @@ public class ParticleSystemController : MonoBehaviour
         computeShader.SetBuffer(kernelCopyRotations, "rotationReadbackBuffer", rotationReadbackBuffer);
         computeShader.Dispatch(kernelCopyRotations, threadGroups, 1, 1);
 
-        // Don't do synchronous readbacks here anymore
-        // Instead, use the cached results from the last async readback
-        // We'll still need these for visualization
-        
         uint[] args = new uint[5];
         drawArgsBufferSpheres.GetData(args);
         args[1] = (uint)activeParticleCount; // Use activeParticleCount instead of total count
         drawArgsBufferSpheres.SetData(args);
 
         sphereMaterial.SetBuffer("particleBuffer", particleBuffer);
-        // Only pass the genome mode buffer to the material if it's not null
-        if (genomeModesBuffer != null)
-        {
-            // Pass the genome mode buffer and default mode to the material for coloring
-            sphereMaterial.SetBuffer("genomeModesBuffer", genomeModesBuffer);
-            sphereMaterial.SetInt("defaultGenomeMode", GetInitialModeIndex());
-        }
         
         Graphics.DrawMeshInstancedIndirect(
             sphereMesh, 0, sphereMaterial,
@@ -307,7 +280,6 @@ public class ParticleSystemController : MonoBehaviour
                     {
                         closestID = i;
                         closestDist = t;
-                        // We don't need hitPoint anymore as we'll use the particle center
                     }
                 }
             }
@@ -315,20 +287,15 @@ public class ParticleSystemController : MonoBehaviour
             if (closestID != -1)
             {
                 selectedParticleID = closestID;
-                // Use the center of the particle instead of the hit point
                 dragTargetWorld = cpuParticlePositions[selectedParticleID];
                 
-                // Store the initial distance from camera to particle center
                 currentDragDistance = Vector3.Distance(Camera.main.transform.position, dragTargetWorld);
             }
         }
 
         if (Input.GetMouseButton(0) && selectedParticleID != -1)
         {
-            // Project the mouse position to world space at the initially captured distance
             Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
-            
-            // Set the drag target at the same distance from the camera as when initially clicked
             dragTargetWorld = Camera.main.transform.position + ray.direction * currentDragDistance;
         }
 
@@ -388,7 +355,6 @@ public class ParticleSystemController : MonoBehaviour
         kernelClearGrid         = computeShader.FindKernel("ClearGrid");
         kernelBuildGrid         = computeShader.FindKernel("BuildHashGrid");
         kernelApplySPHForces    = computeShader.FindKernel("ApplySPHForces");
-        kernelApplyAdhesionForces = computeShader.FindKernel("ApplyAdhesionForces");
         kernelApplyDrag         = computeShader.FindKernel("ApplyDragForce");
         kernelUpdateMotion      = computeShader.FindKernel("UpdateMotion");
         kernelUpdateRotation    = computeShader.FindKernel("UpdateRotation");
@@ -437,7 +403,6 @@ public class ParticleSystemController : MonoBehaviour
         gridNext?.Release();
         gridParticleIndices?.Release();
         torqueAccumBuffer?.Release();
-        genomeModesBuffer?.Release();
 
         if (circleRenderer != null) Destroy(circleRenderer.gameObject);
         if (lineRenderer != null) Destroy(lineRenderer.gameObject);
@@ -455,80 +420,9 @@ public class ParticleSystemController : MonoBehaviour
         computeShader.SetFloat("density", density);
         computeShader.SetFloat("repulsionStrength", repulsionStrength);
         
-        // Release any existing genomeModesBuffer
-        if (genomeModesBuffer != null)
-        {
-            genomeModesBuffer.Release();
-            genomeModesBuffer = null;
-        }
-        
-        // Instead of initializing all 10,000 particles, we'll only initialize what's needed
-        // based on the genome configuration
         int initialParticleCount = 1; // Start with just a single particle
         
-        // Pass genome mode information to the compute shader
-        if (genome != null && genome.modes.Count > 0)
-        {
-            // Get initial genome mode for default adhesion settings
-            GenomeMode initialMode = null;
-            int initialModeIndex = GetInitialModeIndex();
-            
-            if (initialModeIndex >= 0 && initialModeIndex < genome.modes.Count)
-            {
-                initialMode = genome.modes[initialModeIndex];
-                
-                // Set adhesion parameters from the initial genome mode
-                computeShader.SetFloat("adhesionRestLength", initialMode.adhesionRestLength);
-                computeShader.SetFloat("adhesionSpringStiffness", initialMode.adhesionSpringStiffness);
-                computeShader.SetFloat("adhesionSpringDamping", initialMode.adhesionSpringDamping);
-            }
-            
-            // Create a struct containing just the adhesion properties we need
-            GenomeAdhesionData[] genomeData = new GenomeAdhesionData[genome.modes.Count];
-            
-            for (int i = 0; i < genome.modes.Count; i++)
-            {
-                GenomeMode mode = genome.modes[i];
-                genomeData[i] = new GenomeAdhesionData
-                {
-                    parentMakeAdhesion = mode.parentMakeAdhesion ? 1 : 0,
-                    childA_KeepAdhesion = mode.childA_KeepAdhesion ? 1 : 0,
-                    childB_KeepAdhesion = mode.childB_KeepAdhesion ? 1 : 0,
-                    adhesionRestLength = mode.adhesionRestLength,
-                    adhesionSpringStiffness = mode.adhesionSpringStiffness,
-                    adhesionSpringDamping = mode.adhesionSpringDamping,
-                    // Pack RGB color into a uint for easy transfer
-                    colorPacked = PackColor(mode.modeColor),
-                    // Add orientation constraint parameters
-                    orientConstraintStrength = mode.orientationConstraintStrength,
-                    maxAngleDeviation = mode.maxAllowedAngleDeviation
-                };
-            }
-            
-            // Create and set the buffer as a persistent buffer
-            genomeModesBuffer = new ComputeBuffer(genome.modes.Count, 
-                                                 sizeof(int) * 3 + 
-                                                 sizeof(float) * 5 + // 3 adhesion params + 2 orientation params
-                                                 sizeof(uint));
-            genomeModesBuffer.SetData(genomeData);
-            
-            // Set the genome parameters
-            computeShader.SetInt("genomeModesCount", genome.modes.Count);
-            computeShader.SetInt("defaultGenomeMode", initialModeIndex);
-            computeShader.SetInt("activeParticleCount", initialParticleCount);
-            
-            // Set the buffer for all kernels that might need it
-            SetGenomeModesBufferForAllKernels();
-        }
-        else
-        {
-            // No genome data, set count to 0
-            computeShader.SetInt("genomeModesCount", 0);
-            computeShader.SetInt("activeParticleCount", initialParticleCount);
-            
-            // Create a minimal default buffer to satisfy the shader
-            CreateDefaultGenomeModesBuffer();
-        }
+        computeShader.SetInt("activeParticleCount", initialParticleCount);
 
         computeShader.SetBuffer(kernelInitParticles, "particleBuffer", particleBuffer);
         computeShader.SetBuffer(kernelInitParticles, "torqueAccumBuffer", torqueAccumBuffer);
@@ -538,41 +432,22 @@ public class ParticleSystemController : MonoBehaviour
         if (genome != null && genome.modes.Count > 0)
         {
             int initialModeIndex = GetInitialModeIndex();
-            // Get the data for the first particle, set its mode index, and write it back
             Particle[] firstParticle = new Particle[1];
             particleBuffer.GetData(firstParticle, 0, 0, 1);
             firstParticle[0].modeIndex = initialModeIndex;
             
-            // Set the genome flags based on the initial mode
-            GenomeMode initialMode = genome.modes[initialModeIndex];
-            uint flags = 0;
-            
-            if (initialMode.parentMakeAdhesion)
-                flags |= 2; // GENOME_MAKES_ADHESION
-                
-            flags |= 1; // GENOME_HAS_ADHESION (all cells can receive adhesion)
-            
-            firstParticle[0].genomeFlags = flags;
-            firstParticle[0].orientConstraintStr = initialMode.orientationConstraintStrength;
-            
-            // Write the updated particle data back to the buffer
             particleBuffer.SetData(firstParticle, 0, 0, 1);
         }
         
-        // Initialize cell split timers to ensure new cells don't split immediately
         if (cellSplitTimers == null || cellSplitTimers.Length < particleCount)
         {
             cellSplitTimers = new float[particleCount];
         }
         
-        // Initialize all timers to random values between 0 and 80% of their split interval
-        // This prevents all cells from splitting simultaneously
         for (int i = 0; i < particleCount; i++)
         {
-            // Only set timers for cells with a valid mode
             if (genome != null && i < activeParticleCount)
             {
-                // Try to get the cell's mode-specific interval
                 Particle[] particleData = new Particle[1];
                 particleBuffer.GetData(particleData, 0, i, 1);
                 
@@ -580,73 +455,16 @@ public class ParticleSystemController : MonoBehaviour
                 if (modeIndex >= 0 && modeIndex < genome.modes.Count)
                 {
                     float splitInterval = genome.modes[modeIndex].splitInterval;
-                    // Start with a random percentage (0-80%) of the split timer
-                    // This creates a more natural split pattern over time
                     cellSplitTimers[i] = UnityEngine.Random.Range(0f, splitInterval * 0.8f);
                 }
                 else
                 {
-                    // Invalid mode, set timer to 0 (won't split)
                     cellSplitTimers[i] = 0f;
                 }
             }
             else
             {
-                // No valid genome, set timer to 0 (won't split)
                 cellSplitTimers[i] = 0f;
-            }
-        }
-    }
-
-    // Helper method to create a minimal default genome buffer
-    private void CreateDefaultGenomeModesBuffer()
-    {
-        if (genomeModesBuffer == null)
-        {
-            // Create a minimal buffer with one default entry
-            GenomeAdhesionData[] defaultData = new GenomeAdhesionData[1];
-            defaultData[0] = new GenomeAdhesionData
-            {
-                parentMakeAdhesion = 0,
-                childA_KeepAdhesion = 0,
-                childB_KeepAdhesion = 0,
-                adhesionRestLength = 3.0f,
-                adhesionSpringStiffness = 100.0f,
-                adhesionSpringDamping = 5.0f,
-                colorPacked = PackColor(Color.green),
-                orientConstraintStrength = 0.5f,
-                maxAngleDeviation = 45.0f
-            };
-
-            genomeModesBuffer = new ComputeBuffer(1, 
-                                sizeof(int) * 3 + 
-                                sizeof(float) * 5 + 
-                                sizeof(uint));
-            genomeModesBuffer.SetData(defaultData);
-        }
-        
-        // Set the buffer for all kernels that might need it
-        SetGenomeModesBufferForAllKernels();
-    }
-
-    // Helper method to set the genome buffer for all kernels
-    private void SetGenomeModesBufferForAllKernels()
-    {
-        if (genomeModesBuffer != null)
-        {
-            // Setting the buffer for all kernels to prevent errors
-            // This ensures any shader that might use the buffer has it available
-            int kernelCount = computeShader.FindKernel("InitParticles");
-            for (int i = 0; i <= kernelCount; i++)
-            {
-                try
-                {
-                    computeShader.SetBuffer(i, "genomeModesBuffer", genomeModesBuffer);
-                }
-                catch (System.Exception)
-                {
-                    // Ignore errors for kernels that don't use this buffer
-                }
             }
         }
     }
@@ -665,81 +483,47 @@ public class ParticleSystemController : MonoBehaviour
         return 0; // Default to first mode if no initial mode is marked
     }
 
-    // Helper struct to pass just the needed genome data to the GPU
-    private struct GenomeAdhesionData
-    {
-        public int parentMakeAdhesion;
-        public int childA_KeepAdhesion;
-        public int childB_KeepAdhesion;
-        public float adhesionRestLength;
-        public float adhesionSpringStiffness;
-        public float adhesionSpringDamping;
-        public uint colorPacked;
-        public float orientConstraintStrength;
-        public float maxAngleDeviation;
-    }
-
-    // Helper method to pack a Color into a uint
-    private uint PackColor(Color color)
-    {
-        uint r = (uint)(color.r * 255.0f);
-        uint g = (uint)(color.g * 255.0f);
-        uint b = (uint)(color.b * 255.0f);
-        return (r << 16) | (g << 8) | b;
-    }
-
     private void UpdateCellDivisionTimers(float deltaTime)
     {
-        // Initialize timer array if needed
         if (cellSplitTimers == null || cellSplitTimers.Length < activeParticleCount)
         {
-            // Create or resize timer array
             float[] newTimers = new float[particleCount];
             if (cellSplitTimers != null)
             {
-                // Copy existing timers if we're resizing
                 System.Array.Copy(cellSplitTimers, newTimers, cellSplitTimers.Length);
             }
             cellSplitTimers = newTimers;
         }
         
-        // Process pending splits first
         if (pendingSplits.Count > 0)
         {
             ProcessPendingSplits();
         }
         
-        // Check if we can add more cells
         int allowedSplits = particleCount - activeParticleCount;
         if (allowedSplits <= 0 || genome == null || genome.modes.Count == 0) return;
         
-        // Always update timers for all active particles
         for (int i = 0; i < activeParticleCount; i++)
         {
             cellSplitTimers[i] += deltaTime;
         }
         
-        // For low split intervals (like 1.0), we need to be more careful about floating point comparisons
         const float epsilon = 0.001f;
 
-        // Handle all particles - use direct buffer access for the first particle if we don't have valid cached data
         for (int i = 0; i < activeParticleCount; i++)
         {
-            // Get mode index either from cache or directly from buffer for first particle
             int modeIndex;
             
             if (cachedParticleDataValid)
             {
                 modeIndex = cachedParticleData[i].modeIndex;
             }
-            else if (i == 0) // Special case for first particle when cache isn't valid
+            else if (i == 0)
             {
-                // For first particle, we can read directly from the buffer
                 Particle[] particleData = new Particle[1];
                 particleBuffer.GetData(particleData, 0, 0, 1);
                 modeIndex = particleData[0].modeIndex;
                 
-                // If somehow the mode is invalid, use initial mode
                 if (modeIndex < 0 || modeIndex >= genome.modes.Count)
                 {
                     modeIndex = GetInitialModeIndex();
@@ -747,82 +531,65 @@ public class ParticleSystemController : MonoBehaviour
             }
             else
             {
-                // For other particles, if we don't have cached data, skip for now
                 continue;
             }
             
-            // Only proceed if the mode index is valid
             if (modeIndex >= 0 && modeIndex < genome.modes.Count)
             {
                 float splitInterval = genome.modes[modeIndex].splitInterval;
                 
-                // Check if it's time to split - use a small epsilon to handle floating-point issues
                 if (cellSplitTimers[i] >= splitInterval - epsilon && allowedSplits > 0)
                 {
                     SplitCell(i);
-                    cellSplitTimers[i] = 0f; // Reset timer
+                    cellSplitTimers[i] = 0f;
                     allowedSplits--;
                 }
             }
         }
         
-        // Mark the cached data as invalid so we'll request a new readback next frame
-        // Only do this if we actually used the cached data
         if (cachedParticleDataValid)
         {
             cachedParticleDataValid = false;
         }
     }
 
-    // Handle particle cell division
     private void SplitCell(int parentIndex)
     {
         if (genome == null || genome.modes.Count == 0 || parentIndex >= activeParticleCount)
             return;
             
-        // Get the parent cell's position and orientation
         Vector3 parentPos = cpuParticlePositions[parentIndex];
         Quaternion parentRot = cpuParticleRotations[parentIndex];
         
-        // Get the parent's actual mode index by reading from the particle buffer
         Particle[] particleData = new Particle[1];
-        // Fix: Properly read a single particle from the specific index in the buffer
         particleBuffer.GetData(particleData, 0, parentIndex, 1);
         int parentModeIndex = particleData[0].modeIndex;
         
-        // Ensure parent mode index is valid
         if (parentModeIndex < 0 || parentModeIndex >= genome.modes.Count) {
             parentModeIndex = GetInitialModeIndex();
         }
         
-        // Get the genome mode for this cell using the parent's actual mode
         GenomeMode mode = genome.modes[parentModeIndex];
         
-        // Get the child mode indices
         int childAModeIndex = mode.childAModeIndex;
         if (childAModeIndex < 0 || childAModeIndex >= genome.modes.Count)
-            childAModeIndex = parentModeIndex; // Fallback to parent mode
+            childAModeIndex = parentModeIndex;
             
         int childBModeIndex = mode.childBModeIndex;
         if (childBModeIndex < 0 || childBModeIndex >= genome.modes.Count)
-            childBModeIndex = parentModeIndex; // Fallback to parent mode
+            childBModeIndex = parentModeIndex;
         
-        // Calculate split direction
         Vector3 forward = parentRot * Vector3.forward;
         Vector3 up = parentRot * Vector3.up;
         Vector3 right = parentRot * Vector3.right;
         
-        // Get split direction from genome (in local space)
         Vector3 splitDirLocal = GetDirection(mode.parentSplitYaw, mode.parentSplitPitch);
         
-        // Convert to world space
         Vector3 splitDirWorld = right * splitDirLocal.x + up * splitDirLocal.y + forward * splitDirLocal.z;
         
-        // Child A and B positions
         Vector3 posA = parentPos + splitDirWorld * spawnOverlapOffset;
         Vector3 posB = parentPos - splitDirWorld * spawnOverlapOffset;
         
-        // Child orientations
         Vector3 childADirLocal = GetDirection(mode.childA_OrientationYaw, mode.childA_OrientationPitch);
         Vector3 childADirWorld = right * childADirLocal.x + up * childADirLocal.y + forward * childADirLocal.z;
         Quaternion rotA = Quaternion.LookRotation(childADirWorld, up);
@@ -831,15 +598,11 @@ public class ParticleSystemController : MonoBehaviour
         Vector3 childBDirWorld = right * childBDirLocal.x + up * childBDirLocal.y + forward * childBDirLocal.z;
         Quaternion rotB = Quaternion.LookRotation(childBDirWorld, up);
         
-        // Get parent velocity from physics simulation
-        // In a full implementation we'd read the particle buffer, for now we'll assume zero
         Vector3 parentVelocity = Vector3.zero;
         
-        // Create velocities for children
         Vector3 velA = parentVelocity + splitDirWorld * splitVelocityMagnitude;
         Vector3 velB = parentVelocity - splitDirWorld * splitVelocityMagnitude;
         
-        // Create the split data
         CellSplitData splitData = new CellSplitData
         {
             parentIndex = parentIndex,
@@ -853,51 +616,42 @@ public class ParticleSystemController : MonoBehaviour
             childBModeIndex = childBModeIndex
         };
         
-        // Add to pending splits
         pendingSplits.Add(splitData);
     }
     
-    // Process all pending cell splits
     private void ProcessPendingSplits()
     {
         if (pendingSplits.Count == 0)
             return;
         
-        // Create a copy of the particle data that we can modify
         Particle[] particleData = new Particle[particleCount];
         particleBuffer.GetData(particleData);
         
         foreach (var split in pendingSplits)
         {
-            if (activeParticleCount + 1 > particleCount) // Only +1 because we reuse the parent
+            if (activeParticleCount + 1 > particleCount)
             {
                 Debug.LogWarning("Cannot process split - reached maximum cell count");
                 break;
             }
             
-            // Child B will be the new particle
             int childB_Index = activeParticleCount;
             
-            // Update parent particle (becomes Child A)
             cpuParticlePositions[split.parentIndex] = split.positionA;
             cpuParticleRotations[split.parentIndex] = split.rotationA;
             
-            // Set child A velocity, position, and rotation in the particle data
             particleData[split.parentIndex].velocity = (Vector3)split.velocityA;
             particleData[split.parentIndex].position = (Vector3)split.positionA;
             particleData[split.parentIndex].rotation = split.rotationA;
             
-            // Copy parent data for Child B (with modifications)
             particleData[childB_Index] = particleData[split.parentIndex];
             
-            // Set child B position, rotation, velocity
             cpuParticlePositions[childB_Index] = split.positionB;
             cpuParticleRotations[childB_Index] = split.rotationB;
             particleData[childB_Index].velocity = (Vector3)split.velocityB;
             particleData[childB_Index].position = (Vector3)split.positionB;
             particleData[childB_Index].rotation = split.rotationB;
             
-            // Set proper genome flags based on mode
             if (genome != null && genome.modes.Count > 0)
             {
                 int childAModeIndex = split.childAModeIndex;
@@ -905,77 +659,37 @@ public class ParticleSystemController : MonoBehaviour
                 
                 if (childAModeIndex >= 0 && childAModeIndex < genome.modes.Count)
                 {
-                    GenomeMode modeA = genome.modes[childAModeIndex];
-                    uint flagsA = 0;
-                    
-                    if (modeA.parentMakeAdhesion)
-                        flagsA |= 2; // GENOME_MAKES_ADHESION
-                    
-                    flagsA |= 1; // GENOME_HAS_ADHESION (all cells can receive adhesion)
-                    
-                    if (modeA.childA_KeepAdhesion)
-                        flagsA |= 4; // GENOME_CHILD_A_KEEP_ADHESION
-                        
-                    if (modeA.childB_KeepAdhesion)
-                        flagsA |= 8; // GENOME_CHILD_B_KEEP_ADHESION
-                        
-                    particleData[split.parentIndex].genomeFlags = flagsA;
-                    particleData[split.parentIndex].orientConstraintStr = modeA.orientationConstraintStrength;
-                    particleData[split.parentIndex].modeIndex = childAModeIndex; // Set mode index for Child A
+                    particleData[split.parentIndex].modeIndex = childAModeIndex;
                 }
                 
                 if (childBModeIndex >= 0 && childBModeIndex < genome.modes.Count)
                 {
-                    GenomeMode modeB = genome.modes[childBModeIndex];
-                    uint flagsB = 0;
-                    
-                    if (modeB.parentMakeAdhesion)
-                        flagsB |= 2; // GENOME_MAKES_ADHESION
-                    
-                    flagsB |= 1; // GENOME_HAS_ADHESION (all cells can receive adhesion)
-                    
-                    if (modeB.childA_KeepAdhesion)
-                        flagsB |= 4; // GENOME_CHILD_A_KEEP_ADHESION
-                        
-                    if (modeB.childB_KeepAdhesion)
-                        flagsB |= 8; // GENOME_CHILD_B_KEEP_ADHESION
-                        
-                    particleData[childB_Index].genomeFlags = flagsB;
-                    particleData[childB_Index].orientConstraintStr = modeB.orientationConstraintStrength;
-                    particleData[childB_Index].modeIndex = childBModeIndex; // Set mode index for Child B
+                    particleData[childB_Index].modeIndex = childBModeIndex;
                 }
             }
             
-            // Increment active particle count
             activeParticleCount++;
             
-            // Reset timers for both cells
             cellSplitTimers[split.parentIndex] = 0f;
             cellSplitTimers[childB_Index] = 0f;
         }
         
-        // Write the updated particle data back to the GPU
         particleBuffer.SetData(particleData);
         
-        // Clear pending splits
         pendingSplits.Clear();
     }
     
-    // Utility function to convert pitch and yaw to a direction vector
     private Vector3 GetDirection(float yaw, float pitch)
     {
         return Quaternion.Euler(pitch, yaw, 0f) * Vector3.forward;
     }
 
-    // Request particle data using AsyncGPUReadback
     private void RequestParticleDataAsync()
     {
-        // Only start a new request if we don't have one in progress
         if (!particleDataReadbackInProgress && !cachedParticleDataValid)
         {
             particleDataReadbackInProgress = true;
             
-            // Request particle data asynchronously for mode index requirements
             AsyncGPUReadback.Request(particleBuffer, r => 
             {
                 if (r.hasError)
@@ -985,22 +699,18 @@ public class ParticleSystemController : MonoBehaviour
                     return;
                 }
                 
-                // Copy the data to our cache
                 if (cachedParticleData == null || cachedParticleData.Length < activeParticleCount)
                 {
                     cachedParticleData = new Particle[particleCount];
                 }
                 
-                // Copy data from the result to our cache
                 r.GetData<Particle>().CopyTo(cachedParticleData);
                 
-                // Mark our cached data as valid and readback as complete
                 cachedParticleDataValid = true;
                 particleDataReadbackInProgress = false;
             });
         }
         
-        // Also request position and rotation data asynchronously for visualization
         AsyncGPUReadback.Request(positionReadbackBuffer, r => 
         {
             if (!r.hasError)
