@@ -40,6 +40,9 @@ public class ParticleSystemController : MonoBehaviour
     public bool showAdhesionConnections = true;
     public float adhesionLineWidth = 0.2f; // Increased from 0.05f to make lines more visible
 
+    [Header("Split Anchor Settings")]
+    public float anchorGizmoRadius = 0.1f;
+
     private LineRenderer circleRenderer;
     private LineRenderer lineRenderer;
 
@@ -96,6 +99,8 @@ public class ParticleSystemController : MonoBehaviour
         public int particleB;
         public Color connectionColor;
         public bool isFirstGeneration; // Track if this is a first-generation connection
+        public Vector3 localOffsetA; // anchor offset in local space of particleA
+        public Vector3 localOffsetB; // anchor offset in local space of particleB
     }
     
     // List to track all adhesion connections
@@ -106,6 +111,9 @@ public class ParticleSystemController : MonoBehaviour
     
     // Line renderer for visualizing adhesion connections
     private LineRenderer[] adhesionLineRenderers;
+
+    private GameObject[] adhesionAnchorA;
+    private GameObject[] adhesionAnchorB;
 
     struct DragInput
     {
@@ -304,6 +312,15 @@ public class ParticleSystemController : MonoBehaviour
                     }
                 }
             }
+            // Hide all anchors if visualization is disabled
+            if (adhesionAnchorA != null && adhesionAnchorB != null)
+            {
+                for (int i = 0; i < adhesionAnchorA.Length; i++)
+                {
+                    if (adhesionAnchorA[i] != null) adhesionAnchorA[i].SetActive(false);
+                    if (adhesionAnchorB[i] != null) adhesionAnchorB[i].SetActive(false);
+                }
+            }
             return;
         }
         
@@ -341,6 +358,16 @@ public class ParticleSystemController : MonoBehaviour
             lr.endColor = color;
             
             lr.enabled = true;
+
+            // Update anchors: apply local offsets in particle local space
+            Quaternion rotA = cpuParticleRotations[connection.particleA];
+            Quaternion rotB = cpuParticleRotations[connection.particleB];
+            Vector3 worldOffsetA = rotA * connection.localOffsetA;
+            Vector3 worldOffsetB = rotB * connection.localOffsetB;
+            adhesionAnchorA[i].SetActive(true);
+            adhesionAnchorA[i].transform.position = posA + worldOffsetA;
+            adhesionAnchorB[i].SetActive(true);
+            adhesionAnchorB[i].transform.position = posB + worldOffsetB;
         }
         
         // Disable any unused line renderers
@@ -350,6 +377,13 @@ public class ParticleSystemController : MonoBehaviour
             {
                 adhesionLineRenderers[i].enabled = false;
             }
+        }
+
+        // Disable unused anchors
+        for (int i = adhesionConnections.Count; i < adhesionAnchorA.Length; i++)
+        {
+            if (adhesionAnchorA[i] != null) adhesionAnchorA[i].SetActive(false);
+            if (adhesionAnchorB[i] != null) adhesionAnchorB[i].SetActive(false);
         }
     }
     
@@ -520,6 +554,28 @@ public class ParticleSystemController : MonoBehaviour
                 if (adhesionLineRenderers[i] != null)
                 {
                     Destroy(adhesionLineRenderers[i].gameObject);
+                }
+            }
+        }
+
+        if (adhesionAnchorA != null)
+        {
+            for (int i = 0; i < adhesionAnchorA.Length; i++)
+            {
+                if (adhesionAnchorA[i] != null)
+                {
+                    Destroy(adhesionAnchorA[i]);
+                }
+            }
+        }
+
+        if (adhesionAnchorB != null)
+        {
+            for (int i = 0; i < adhesionAnchorB.Length; i++)
+            {
+                if (adhesionAnchorB[i] != null)
+                {
+                    Destroy(adhesionAnchorB[i]);
                 }
             }
         }
@@ -723,7 +779,7 @@ public class ParticleSystemController : MonoBehaviour
         
         Vector3 velA = parentVelocity + splitDirWorld * splitVelocityMagnitude;
         Vector3 velB = parentVelocity - splitDirWorld * splitVelocityMagnitude;
-        
+
         CellSplitData splitData = new CellSplitData
         {
             parentIndex = parentIndex,
@@ -815,9 +871,9 @@ public class ParticleSystemController : MonoBehaviour
                     float angleA = Vector3.Angle(neighborDir, aDir);
                     float angleB = Vector3.Angle(neighborDir, bDir);
 
-                    if (childAMode != null && childAMode.childA_KeepAdhesion && angleA <= 94f && !ConnectionExists(parentIndex, neighbor))
+                    if (childAMode != null && childAMode.childA_KeepAdhesion && angleA <= 95f && !ConnectionExists(parentIndex, neighbor))
                         CreateAdhesionConnection(parentIndex, neighbor, childAMode);
-                    if (childBMode != null && childBMode.childB_KeepAdhesion && angleB <= 94f && !ConnectionExists(childB_Index, neighbor))
+                    if (childBMode != null && childBMode.childB_KeepAdhesion && angleB <= 95f && !ConnectionExists(childB_Index, neighbor))
                         CreateAdhesionConnection(childB_Index, neighbor, childBMode);
                 }
             }
@@ -955,6 +1011,40 @@ public class ParticleSystemController : MonoBehaviour
                 
                 adhesionLineRenderers[i] = lr;
             }
+
+            // Create anchor spheres parent
+            GameObject anchorsParent = new GameObject("AdhesionAnchors");
+            anchorsParent.transform.SetParent(transform);
+            adhesionAnchorA = new GameObject[particleCount];
+            adhesionAnchorB = new GameObject[particleCount];
+            for (int i = 0; i < particleCount; i++)
+            {
+                var aObj = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+                aObj.name = $"AdhesionAnchorA_{i}";
+                aObj.transform.SetParent(anchorsParent.transform);
+                aObj.transform.localScale = Vector3.one * minRadius * 0.2f;
+                // Remove physics collider
+                Destroy(aObj.GetComponent<Collider>());
+                // Assign simple unlit material with white color for visibility
+                var matA = new Material(Shader.Find("Sprites/Default"));
+                matA.color = Color.white;
+                aObj.GetComponent<Renderer>().sharedMaterial = matA;
+                aObj.SetActive(false);
+                adhesionAnchorA[i] = aObj;
+
+                var bObj = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+                bObj.name = $"AdhesionAnchorB_{i}";
+                bObj.transform.SetParent(anchorsParent.transform);
+                bObj.transform.localScale = Vector3.one * minRadius * 0.2f;
+                // Remove physics collider
+                Destroy(bObj.GetComponent<Collider>());
+                // Assign simple unlit material with white color for visibility
+                var matB = new Material(Shader.Find("Sprites/Default"));
+                matB.color = Color.white;
+                bObj.GetComponent<Renderer>().sharedMaterial = matB;
+                bObj.SetActive(false);
+                adhesionAnchorB[i] = bObj;
+            }
         }
         else
         {
@@ -972,15 +1062,40 @@ public class ParticleSystemController : MonoBehaviour
 
     private void CreateAdhesionConnection(int particleA, int particleB, GenomeMode mode)
     {
-        // Always create a sibling adhesion connection when splitting
         ParticleAdhesion adhesion = new ParticleAdhesion
         {
             particleA = particleA,
             particleB = particleB,
             connectionColor = mode.modeColor,
-            isFirstGeneration = false
+            isFirstGeneration = false,
+            localOffsetA = Vector3.zero, // will set below
+            localOffsetB = Vector3.zero  // will set below
         };
+        // Compute world positions and offsets
+        Vector3 posA = cpuParticlePositions[particleA];
+        Vector3 posB = cpuParticlePositions[particleB];
+        Vector3 dir = (posB - posA).normalized;
+        float radiusA = cachedParticleDataValid ? cachedParticleData[particleA].radius : minRadius;
+        float radiusB = cachedParticleDataValid ? cachedParticleData[particleB].radius : minRadius;
+        Vector3 worldOffsetA = dir * (radiusA * 0.5f);
+        Vector3 worldOffsetB = -dir * (radiusB * 0.5f);
+        // Convert to each particle's local space
+        adhesion.localOffsetA = Quaternion.Inverse(cpuParticleRotations[particleA]) * worldOffsetA;
+        adhesion.localOffsetB = Quaternion.Inverse(cpuParticleRotations[particleB]) * worldOffsetB;
         adhesionConnections.Add(adhesion);
         Debug.Log($"Created adhesion connection between particles {particleA} and {particleB}");
+    }
+
+    // Validate quaternion magnitude
+    private bool IsQuaternionValid(Quaternion q)
+    {
+        float mag = Mathf.Sqrt(q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w);
+        return !Mathf.Approximately(mag, 0f) && Mathf.Abs(mag - 1f) <= 0.01f;
+    }
+
+    // Clear anchors when disabled
+    private void OnDisable()
+    {
+        // No longer using splitAnchors, so no need to clear it
     }
 }
