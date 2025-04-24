@@ -15,24 +15,24 @@ MonoBehaviour:
   modes:
   - index: 0
     modeName: Mode 0
-    splitInterval: 0
+    splitInterval: 5
     isInitial: 1
-    parentMakeAdhesion: 0
-    modeColor: {r: 1, g: 1, b: 1, a: 0}
+    parentMakeAdhesion: 1
+    modeColor: {r: 0, g: 0, b: 0, a: 0}
     parentSplitYaw: 0
     parentSplitPitch: 0
     childAModeIndex: 0
-    childA_OrientationYaw: -7
+    childA_OrientationYaw: 90
     childA_OrientationPitch: 0
-    childA_KeepAdhesion: 0
+    childA_KeepAdhesion: 1
     childBModeIndex: 0
-    childB_OrientationYaw: -180
+    childB_OrientationYaw: 90
     childB_OrientationPitch: 0
-    childB_KeepAdhesion: 0
-    adhesionRestLength: 0
-    adhesionSpringStiffness: 0
+    childB_KeepAdhesion: 1
+    adhesionRestLength: 1
+    adhesionSpringStiffness: 10
     adhesionSpringDamping: 0
     orientationConstraintStrength: 0
     maxAllowedAngleDeviation: 0
     adhesionCanBreak: 0
-    adhesionBreakForce: 0
+    adhesionBreakForce: 100
