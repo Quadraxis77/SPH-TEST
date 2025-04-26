@@ -38,10 +38,6 @@ public class ParticleSystemController : MonoBehaviour
     public Color dragCircleColor = Color.green;
     public float dragCircleRadius = 1.0f;
 
-    [Header("Adhesion Visualization")]
-    public bool showAdhesionConnections = true;
-    public float adhesionLineWidth = 0.2f; // Increased from 0.05f to make lines more visible
-
     [Header("Text Labels")]
     public bool showParticleLabels = true;
     public float labelOffset = 2.5f;
@@ -98,27 +94,6 @@ public class ParticleSystemController : MonoBehaviour
     
     // List to track pending cell splits
     private List<CellSplitData> pendingSplits = new List<CellSplitData>();
-
-    // Struct to track adhesion between particles 
-    private struct ParticleAdhesion
-    {
-        public int particleA;
-        public int particleB;
-        public Color connectionColor;
-        public bool isFirstGeneration; // Track if this is a first-generation connection
-    }
-    
-    // List to track all adhesion connections
-    private List<ParticleAdhesion> adhesionConnections = new List<ParticleAdhesion>();
-    
-    // Dictionary to track particle parentage for adhesion management
-    private Dictionary<int, int> particleParentage = new Dictionary<int, int>();
-    
-    // Line renderer for visualizing adhesion connections
-    private LineRenderer[] adhesionLineRenderers;
-
-    // Blueprint of mode-to-mode adhesion rules
-    private Dictionary<int, HashSet<int>> adhesionBlueprint;
 
     struct DragInput
     {
@@ -180,30 +155,14 @@ public class ParticleSystemController : MonoBehaviour
             CellGenome.OnGenomeChanged += OnGenomeChanged;
         }
 
-        // Build adhesion blueprint from genome modes
-        adhesionBlueprint = new Dictionary<int, HashSet<int>>();
-        for (int i = 0; i < genome.modes.Count; i++)
-        {
-            adhesionBlueprint[i] = new HashSet<int>();
-            GenomeMode mode = genome.modes[i];
-            if (mode.childA_KeepAdhesion && mode.childAModeIndex >= 0)
-                adhesionBlueprint[i].Add(mode.childAModeIndex);
-            if (mode.childB_KeepAdhesion && mode.childBModeIndex >= 0)
-                adhesionBlueprint[i].Add(mode.childBModeIndex);
-            // Include sibling (parent→childB) if parentMakeAdhesion is enabled
-            if (mode.parentMakeAdhesion && mode.childBModeIndex >= 0)
-                adhesionBlueprint[i].Add(mode.childBModeIndex);
-        }
-
         // Initialize all buffers
         InitializeBuffers();
         
         // Initialize particles with genome properties
         InitializeParticles();
         
-        // Initialize adhesion line renderers
-        InitializeAdhesionLineRenderers();
-        InitializeParticleLabels();  // set up labels
+        // Initialize particle labels
+        InitializeParticleLabels();
     }
 
     void Update()
@@ -283,7 +242,6 @@ public class ParticleSystemController : MonoBehaviour
             drawArgsBufferSpheres);
 
         UpdateDragVisualization();
-        UpdateAdhesionVisualization();
         UpdateParticleLabels();  // refresh labels
     }
 
@@ -314,78 +272,6 @@ public class ParticleSystemController : MonoBehaviour
             circleRenderer.enabled = false;
             lineRenderer.enabled = false;
         }
-    }
-
-    private void UpdateAdhesionVisualization()
-    {
-        if (!showAdhesionConnections) 
-        {
-            // Hide all connection lines if visualization is disabled
-            if (adhesionLineRenderers != null)
-            {
-                foreach (var lr in adhesionLineRenderers)
-                {
-                    if (lr != null)
-                    {
-                        lr.enabled = false;
-                    }
-                }
-            }
-            return;
-        }
-        
-        // Remove invalid connections (e.g., if a particle was removed)
-        CleanupInvalidAdhesionConnections();
-        
-        // Update line positions for all adhesion connections
-        for (int i = 0; i < adhesionConnections.Count; i++)
-        {
-            if (i >= adhesionLineRenderers.Length) break;
-            
-            var connection = adhesionConnections[i];
-            LineRenderer lr = adhesionLineRenderers[i];
-            
-            // Make sure both particles are within active range
-            if (connection.particleA >= activeParticleCount || connection.particleB >= activeParticleCount)
-            {
-                lr.enabled = false;
-                continue;
-            }
-            
-            // Get updated positions from cpuParticlePositions
-            Vector3 posA = cpuParticlePositions[connection.particleA];
-            Vector3 posB = cpuParticlePositions[connection.particleB];
-            
-            // Update line positions
-            lr.SetPosition(0, posA);
-            lr.SetPosition(1, posB);
-            
-            // Set line color based on connection, but ensure it's highly visible
-            Color color = connection.connectionColor;
-            // Make sure alpha is high enough
-            color.a = 1.0f;
-            lr.startColor = color;
-            lr.endColor = color;
-            
-            lr.enabled = true;
-        }
-        
-        // Disable any unused line renderers
-        for (int i = adhesionConnections.Count; i < adhesionLineRenderers.Length; i++)
-        {
-            if (adhesionLineRenderers[i] != null)
-            {
-                adhesionLineRenderers[i].enabled = false;
-            }
-        }
-    }
-    
-    private void CleanupInvalidAdhesionConnections()
-    {
-        // Remove adhesion connections for particles that no longer exist or are beyond activeParticleCount
-        adhesionConnections.RemoveAll(c => 
-            c.particleA >= activeParticleCount || 
-            c.particleB >= activeParticleCount);
     }
 
     void HandleMouseDrag()
@@ -540,17 +426,6 @@ public class ParticleSystemController : MonoBehaviour
         if (circleRenderer != null) Destroy(circleRenderer.gameObject);
         if (lineRenderer != null) Destroy(lineRenderer.gameObject);
         
-        if (adhesionLineRenderers != null)
-        {
-            for (int i = 0; i < adhesionLineRenderers.Length; i++)
-            {
-                if (adhesionLineRenderers[i] != null)
-                {
-                    Destroy(adhesionLineRenderers[i].gameObject);
-                }
-            }
-        }
-        
         if (particleLabels != null)
         {
             foreach (var lbl in particleLabels)
@@ -565,10 +440,6 @@ public class ParticleSystemController : MonoBehaviour
 
     private void InitializeParticles()
     {
-        // Clear any existing adhesion connections when resetting
-        adhesionConnections.Clear();
-        particleParentage.Clear();
-        
         computeShader.SetFloat("spawnRadius", spawnRadius);
         computeShader.SetFloat("minRadius", minRadius);
         computeShader.SetFloat("maxRadius", maxRadius);
@@ -662,50 +533,66 @@ public class ParticleSystemController : MonoBehaviour
         int allowedSplits = particleCount - activeParticleCount;
         if (allowedSplits <= 0 || genome == null || genome.modes.Count == 0) return;
         
+        // Update all timers
         for (int i = 0; i < activeParticleCount; i++)
         {
             cellSplitTimers[i] += deltaTime;
         }
         
+        // Create a list to collect cells that are ready to split
+        List<int> cellsReadyToSplit = new List<int>();
         const float epsilon = 0.001f;
 
-        for (int i = 0; i < activeParticleCount; i++)
+        // First pass: identify all cells ready to split
+        if (cachedParticleDataValid)
         {
-            int modeIndex;
-            
-            if (cachedParticleDataValid)
+            // Use cached data if available
+            for (int i = 0; i < activeParticleCount && cellsReadyToSplit.Count < allowedSplits; i++)
             {
-                modeIndex = cachedParticleData[i].modeIndex;
-            }
-            else if (i == 0)
-            {
-                Particle[] particleData = new Particle[1];
-                particleBuffer.GetData(particleData, 0, 0, 1);
-                modeIndex = particleData[0].modeIndex;
+                int modeIndex = cachedParticleData[i].modeIndex;
                 
-                if (modeIndex < 0 || modeIndex >= genome.modes.Count)
+                if (modeIndex >= 0 && modeIndex < genome.modes.Count)
                 {
-                    modeIndex = GetInitialModeIndex();
+                    float splitInterval = genome.modes[modeIndex].splitInterval;
+                    
+                    if (cellSplitTimers[i] >= splitInterval - epsilon)
+                    {
+                        cellsReadyToSplit.Add(i);
+                        cellSplitTimers[i] = 0f;
+                    }
                 }
             }
-            else
-            {
-                continue;
-            }
+        }
+        else
+        {
+            // If cached data is not available, read directly from GPU buffer
+            Particle[] particleData = new Particle[activeParticleCount];
+            particleBuffer.GetData(particleData, 0, 0, activeParticleCount);
             
-            if (modeIndex >= 0 && modeIndex < genome.modes.Count)
+            for (int i = 0; i < activeParticleCount && cellsReadyToSplit.Count < allowedSplits; i++)
             {
-                float splitInterval = genome.modes[modeIndex].splitInterval;
+                int modeIndex = particleData[i].modeIndex;
                 
-                if (cellSplitTimers[i] >= splitInterval - epsilon && allowedSplits > 0)
+                if (modeIndex >= 0 && modeIndex < genome.modes.Count)
                 {
-                    SplitCell(i);
-                    cellSplitTimers[i] = 0f;
-                    allowedSplits--;
+                    float splitInterval = genome.modes[modeIndex].splitInterval;
+                    
+                    if (cellSplitTimers[i] >= splitInterval - epsilon)
+                    {
+                        cellsReadyToSplit.Add(i);
+                        cellSplitTimers[i] = 0f;
+                    }
                 }
             }
         }
         
+        // Second pass: process all splits
+        foreach (int cellIndex in cellsReadyToSplit)
+        {
+            SplitCell(cellIndex);
+        }
+        
+        // Reset cache validity flag
         if (cachedParticleDataValid)
         {
             cachedParticleDataValid = false;
@@ -795,79 +682,44 @@ public class ParticleSystemController : MonoBehaviour
             }
 
             int parentIndex = split.parentIndex;
-            Vector3 oldParentPos = cpuParticlePositions[parentIndex];
+            
+            // Update parent (Child A) with new position, velocity, rotation, and mode
+            particleData[parentIndex].position = split.positionA;
+            particleData[parentIndex].velocity = split.velocityA;
+            particleData[parentIndex].rotation = split.rotationA;
+            particleData[parentIndex].modeIndex = split.childAModeIndex;
 
-            // Initialize mode references for adhesion logic
-            int parentModeIndex = particleData[parentIndex].modeIndex;
-            GenomeMode parentMode = genome.modes[parentModeIndex];
-            GenomeMode childAMode = genome.modes[split.childAModeIndex];
-            GenomeMode childBMode = genome.modes[split.childBModeIndex];
+            // Create Child B at the active particle count index
+            int childBIndex = activeParticleCount;
+            particleData[childBIndex] = particleData[parentIndex]; // Copy properties from parent
+            particleData[childBIndex].position = split.positionB;
+            particleData[childBIndex].velocity = split.velocityB;
+            particleData[childBIndex].rotation = split.rotationB;
+            particleData[childBIndex].modeIndex = split.childBModeIndex;
+            
+            // Increment active particle count
+            activeParticleCount++;
 
-            // record all neighbors
-            List<int> connectedNeighbors = FindConnectedParticles(parentIndex);
-
-            // remove all old connections for parent
-            adhesionConnections.RemoveAll(c => c.particleA == parentIndex || c.particleB == parentIndex);
-
-            int childB_Index = activeParticleCount;
-            // update parent and child B positions...
-
-            // create sibling adhesion
-            if (parentMode != null && parentMode.parentMakeAdhesion)
-                CreateAdhesionConnection(parentIndex, childB_Index, parentMode, true);
-
-            // apply keep adhesion from parent to children
-            foreach (int neighbor in connectedNeighbors)
+            // Initialize split timer for the new cell
+            if (childBIndex < cellSplitTimers.Length)
             {
-                Vector3 neighborDir = cpuParticlePositions[neighbor] - oldParentPos;
-                Vector3 aDir = split.positionA - oldParentPos;
-                Vector3 bDir = split.positionB - oldParentPos;
-
-                float angleA = Vector3.Angle(neighborDir, aDir);
-                float angleB = Vector3.Angle(neighborDir, bDir);
-
-                if (childAMode != null && childAMode.childA_KeepAdhesion && angleA <= 90f && !ConnectionExists(parentIndex, neighbor))
-                    CreateAdhesionConnection(parentIndex, neighbor, childAMode, false);
-                if (childBMode != null && childBMode.childB_KeepAdhesion && angleB <= 90f && !ConnectionExists(childB_Index, neighbor))
-                    CreateAdhesionConnection(childB_Index, neighbor, childBMode, false);
+                if (split.childBModeIndex < genome.modes.Count)
+                {
+                    float splitInterval = genome.modes[split.childBModeIndex].splitInterval;
+                    cellSplitTimers[childBIndex] = UnityEngine.Random.Range(0f, splitInterval * 0.5f);
+                }
+                else
+                {
+                    cellSplitTimers[childBIndex] = 0f;
+                }
             }
-
-            // ...rest of loop...
         }
-        // ...existing code...
-    }
 
-    // Helper to find connected particles on CPU
-    private List<int> FindConnectedParticles(int index)
-    {
-        var list = new List<int>();
-        foreach (var conn in adhesionConnections)
-        {
-            if (conn.particleA == index)
-                list.Add(conn.particleB);
-            else if (conn.particleB == index)
-                list.Add(conn.particleA);
-        }
-        return list;
-    }
-
-    // Remove all connections involving a specific particle, except first-generation sibling edges
-    private void RemoveAdhesionConnectionsForParticle(int index)
-    {
-        // Keep direct parent-child (first-gen) connections; remove all others
-        adhesionConnections.RemoveAll(c =>
-            (c.particleA == index || c.particleB == index) && !c.isFirstGeneration);
-    }
-
-    // Check if a connection already exists
-    private bool ConnectionExists(int a, int b)
-    {
-        foreach (var c in adhesionConnections)
-        {
-            if ((c.particleA == a && c.particleB == b) || (c.particleA == b && c.particleB == a))
-                return true;
-        }
-        return false;
+        // Write updated particle data back to the buffer
+        particleBuffer.SetData(particleData);
+        
+        // Clear pending splits after processing
+        pendingSplits.Clear();
     }
 
     private Vector3 GetDirection(float yaw, float pitch)
@@ -919,78 +771,6 @@ public class ParticleSystemController : MonoBehaviour
         });
     }
 
-    private void InitializeAdhesionLineRenderers()
-    {
-        // Check if we need to create new line renderers or if existing ones need adjustment
-        if (adhesionLineRenderers == null || adhesionLineRenderers.Length != particleCount)
-        {
-            // If any existing line renderers exist, destroy them first
-            if (adhesionLineRenderers != null)
-            {
-                for (int i = 0; i < adhesionLineRenderers.Length; i++)
-                {
-                    if (adhesionLineRenderers[i] != null)
-                    {
-                        Destroy(adhesionLineRenderers[i].gameObject);
-                    }
-                }
-            }
-
-            // Create new array of line renderers, one per potential adhesion
-            adhesionLineRenderers = new LineRenderer[particleCount];
-            
-            // Create a parent GameObject to organize the line renderers in the hierarchy
-            GameObject adhesionLinesParent = new GameObject("AdhesionLines");
-            adhesionLinesParent.transform.SetParent(transform);
-            
-            for (int i = 0; i < particleCount; i++)
-            {
-                GameObject lineObj = new GameObject($"AdhesionLine_{i}");
-                lineObj.transform.SetParent(adhesionLinesParent.transform);
-                
-                LineRenderer lr = lineObj.AddComponent<LineRenderer>();
-                lr.startWidth = adhesionLineWidth;
-                lr.endWidth = adhesionLineWidth;
-                lr.positionCount = 2;
-                
-                // Create material with better visibility
-                Material lineMaterial = new Material(Shader.Find("Sprites/Default"));
-                lineMaterial.renderQueue = 3000; // Ensure it renders on top
-                lr.material = lineMaterial;
-                lr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
-                lr.receiveShadows = false;
-                lr.enabled = false;
-                
-                adhesionLineRenderers[i] = lr;
-            }
-        }
-        else
-        {
-            // Update existing line renderers with current width setting
-            for (int i = 0; i < adhesionLineRenderers.Length; i++)
-            {
-                if (adhesionLineRenderers[i] != null)
-                {
-                    adhesionLineRenderers[i].startWidth = adhesionLineWidth;
-                    adhesionLineRenderers[i].endWidth = adhesionLineWidth;
-                }
-            }
-        }
-    }
-
-    private void CreateAdhesionConnection(int particleA, int particleB, GenomeMode mode, bool isFirstGeneration)
-    {
-        ParticleAdhesion adhesion = new ParticleAdhesion
-        {
-            particleA = particleA,
-            particleB = particleB,
-            connectionColor = mode.modeColor,
-            isFirstGeneration = isFirstGeneration
-        };
-        adhesionConnections.Add(adhesion);
-        Debug.Log($"Created adhesion connection between particles {particleA} and {particleB}");
-    }
-
     // Validate quaternion magnitude
     private bool IsQuaternionValid(Quaternion q)
     {
@@ -1001,7 +781,7 @@ public class ParticleSystemController : MonoBehaviour
     // Clear anchors when disabled
     private void OnDisable()
     {
-        // No longer using splitAnchors, so no need to clear it
+        // No specific cleanup needed
     }
 
     // Initialize text labels for each particle
