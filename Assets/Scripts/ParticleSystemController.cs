@@ -18,7 +18,7 @@ public class ParticleSystemController : MonoBehaviour
     [Range(0f, 10f)] public float torqueDamping = 0.5f;
     [Range(0f, 10f)] public float boundaryFriction = 0.8f;
     [Range(1f, 10f)] public float rollingContactRadiusMultiplier = 5.0f;
-    [Range(0f, 10f)] public float density = 1.0f;
+    [Range(0f, 10f)] public float density = 0.1f;
     [Range(0f, 500f)] public float repulsionStrength = 200.0f;
 
     [Header("Cell Division Settings")]
