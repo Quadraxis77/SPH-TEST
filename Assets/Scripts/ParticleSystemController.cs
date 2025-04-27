@@ -484,8 +484,8 @@ public class ParticleSystemController : MonoBehaviour
                 int modeIndex = particleData[0].modeIndex;
                 if (modeIndex >= 0 && modeIndex < genome.modes.Count)
                 {
-                    float splitInterval = genome.modes[modeIndex].splitInterval;
-                    cellSplitTimers[i] = UnityEngine.Random.Range(0f, splitInterval * 0.8f);
+                    // Initialize all timers to 0 to allow for simultaneous splits
+                    cellSplitTimers[i] = 0f;
                 }
                 else
                 {
@@ -547,7 +547,7 @@ public class ParticleSystemController : MonoBehaviour
         if (cachedParticleDataValid)
         {
             // Use cached data if available
-            for (int i = 0; i < activeParticleCount && cellsReadyToSplit.Count < allowedSplits; i++)
+            for (int i = 0; i < activeParticleCount && i < cachedParticleData.Length; i++)
             {
                 int modeIndex = cachedParticleData[i].modeIndex;
                 
@@ -557,7 +557,13 @@ public class ParticleSystemController : MonoBehaviour
                     
                     if (cellSplitTimers[i] >= splitInterval - epsilon)
                     {
-                        cellsReadyToSplit.Add(i);
+                        // Add to split list if we still have room for new particles
+                        if (cellsReadyToSplit.Count < allowedSplits)
+                        {
+                            cellsReadyToSplit.Add(i);
+                        }
+                        
+                        // Reset timer regardless of whether we can actually split now
                         cellSplitTimers[i] = 0f;
                     }
                 }
@@ -569,7 +575,7 @@ public class ParticleSystemController : MonoBehaviour
             Particle[] particleData = new Particle[activeParticleCount];
             particleBuffer.GetData(particleData, 0, 0, activeParticleCount);
             
-            for (int i = 0; i < activeParticleCount && cellsReadyToSplit.Count < allowedSplits; i++)
+            for (int i = 0; i < activeParticleCount; i++)
             {
                 int modeIndex = particleData[i].modeIndex;
                 
@@ -579,21 +585,27 @@ public class ParticleSystemController : MonoBehaviour
                     
                     if (cellSplitTimers[i] >= splitInterval - epsilon)
                     {
-                        cellsReadyToSplit.Add(i);
+                        // Add to split list if we still have room for new particles
+                        if (cellsReadyToSplit.Count < allowedSplits)
+                        {
+                            cellsReadyToSplit.Add(i);
+                        }
+                        
+                        // Reset timer regardless of whether we can actually split now
                         cellSplitTimers[i] = 0f;
                     }
                 }
             }
         }
         
-        // Second pass: process all splits
+        // Second pass: process all splits at once
         foreach (int cellIndex in cellsReadyToSplit)
         {
             SplitCell(cellIndex);
         }
         
         // Reset cache validity flag
-        if (cachedParticleDataValid)
+        if (cachedParticleDataValid && cellsReadyToSplit.Count > 0)
         {
             cachedParticleDataValid = false;
         }
@@ -703,15 +715,8 @@ public class ParticleSystemController : MonoBehaviour
             // Initialize split timer for the new cell
             if (childBIndex < cellSplitTimers.Length)
             {
-                if (split.childBModeIndex < genome.modes.Count)
-                {
-                    float splitInterval = genome.modes[split.childBModeIndex].splitInterval;
-                    cellSplitTimers[childBIndex] = UnityEngine.Random.Range(0f, splitInterval * 0.5f);
-                }
-                else
-                {
-                    cellSplitTimers[childBIndex] = 0f;
-                }
+                // Set all timers to 0 to maintain synchronization
+                cellSplitTimers[childBIndex] = 0f;
             }
         }
 
