@@ -6,6 +6,10 @@ using TMPro;
 
 public class ParticleSystemController : MonoBehaviour
 {
+    // Initialize these variables to empty collections to avoid null reference exceptions
+    private Dictionary<int, AdhesionConnections.Cell> currentCells = new Dictionary<int, AdhesionConnections.Cell>();
+    private HashSet<AdhesionConnections.Bond> currentBonds = new HashSet<AdhesionConnections.Bond>();
+    
     [Header("Particle Configuration")]
     public int particleCount = 10000;
     public float minRadius = 1.5f;
@@ -46,8 +50,13 @@ public class ParticleSystemController : MonoBehaviour
     public bool showParticleIds = true;
     public bool showParticleModes = true;
 
+    [Header("Adhesion Settings")]
+    public Color adhesionLineColor = Color.yellow;
+    [Range(1.0f, 5.0f)] public float adhesionConnectionDistance = 2.5f;
+
     private LineRenderer circleRenderer;
     private LineRenderer lineRenderer;
+    private LineRenderer adhesionLineRenderer;
 
     ComputeBuffer particleBuffer, dragInputBuffer, drawArgsBufferSpheres;
     ComputeBuffer positionReadbackBuffer, rotationReadbackBuffer;
@@ -75,6 +84,9 @@ public class ParticleSystemController : MonoBehaviour
     private float currentDragDistance;
     private int activeParticleCount = 1; // Class-level variable to track active particles
 
+    // Global counter to ensure unique IDs are never reused
+    private int nextUniqueIDCounter = 1; // Start at 1 since first particle (0) is created in Start
+    
     // Timer variables for cell splitting
     private float[] cellSplitTimers;
     
@@ -123,6 +135,10 @@ public class ParticleSystemController : MonoBehaviour
         public int modeIndex; // Added field to store the mode index
     }
 
+    // Now using AdhesionConnections.ParticleIDData instead of a local struct
+    // Array to store formatted IDs for each particle
+    private AdhesionConnections.ParticleIDData[] particleIDs;
+
     // Add member variables to track readback requests
     private bool particleDataReadbackInProgress = false;
     private Particle[] cachedParticleData;
@@ -163,10 +179,51 @@ public class ParticleSystemController : MonoBehaviour
         
         // Initialize particle labels
         InitializeParticleLabels();
+
+        // Initialize adhesion line renderer
+        GameObject adhesionLineObject = new GameObject("AdhesionLines");
+        adhesionLineRenderer = adhesionLineObject.AddComponent<LineRenderer>();
+        adhesionLineRenderer.startWidth = 0.02f;
+        adhesionLineRenderer.endWidth = 0.02f;
+        adhesionLineRenderer.material = new Material(Shader.Find("Sprites/Default"));
+        adhesionLineRenderer.material.color = adhesionLineColor;
+        adhesionLineRenderer.enabled = false;
+        
+        // Simulate and create adhesion connections at startup
+        SimulateAdhesionConnections();
+    }
+
+    private void SimulateAdhesionConnections()
+    {
+        Debug.Log("SimulateAdhesionConnections method is being executed.");
+        
+        // Use AdhesionConnections class methods to generate connections
+        float maxBondDistance = maxRadius * adhesionConnectionDistance;
+        var (cells, bonds) = AdhesionConnections.CreateAdhesionsFromParticles(
+            cpuParticlePositions,
+            cpuParticleRotations,
+            activeParticleCount,
+            particleIDs,
+            maxBondDistance
+        );
+        
+        // Update current cells and bonds
+        currentCells = cells;
+        currentBonds = bonds;
+        
+        // Visualize the connections
+        AdhesionConnections.VisualizeConnections(
+            adhesionLineRenderer,
+            currentCells,
+            currentBonds,
+            adhesionLineColor
+        );
     }
 
     void Update()
     {
+        Debug.Log("ParticleSystemController Update is running"); // Confirm script is active
+
         float dt = Time.deltaTime;
         int threadGroups = Mathf.CeilToInt(particleCount / 64f);
 
@@ -425,6 +482,7 @@ public class ParticleSystemController : MonoBehaviour
 
         if (circleRenderer != null) Destroy(circleRenderer.gameObject);
         if (lineRenderer != null) Destroy(lineRenderer.gameObject);
+        if (adhesionLineRenderer != null) Destroy(adhesionLineRenderer.gameObject);
         
         if (particleLabels != null)
         {
@@ -440,6 +498,19 @@ public class ParticleSystemController : MonoBehaviour
 
     private void InitializeParticles()
     {
+        Debug.Log("Initializing particles..."); // Trace start
+
+        // Initialize particle IDs array
+        if (particleIDs == null || particleIDs.Length != particleCount)
+        {
+            particleIDs = new AdhesionConnections.ParticleIDData[particleCount];
+            
+            // Set initial particle (root cell) with ID 00.00.A
+            particleIDs[0].parentID = 0;
+            particleIDs[0].uniqueID = 0;
+            particleIDs[0].childType = 'A';
+        }
+
         computeShader.SetFloat("spawnRadius", spawnRadius);
         computeShader.SetFloat("minRadius", minRadius);
         computeShader.SetFloat("maxRadius", maxRadius);
@@ -449,15 +520,17 @@ public class ParticleSystemController : MonoBehaviour
         computeShader.SetFloat("rollingContactRadiusMultiplier", rollingContactRadiusMultiplier);
         computeShader.SetFloat("density", density);
         computeShader.SetFloat("repulsionStrength", repulsionStrength);
-        
+
         int initialParticleCount = 1; // Start with just a single particle
-        
+
         computeShader.SetInt("activeParticleCount", initialParticleCount);
 
         computeShader.SetBuffer(kernelInitParticles, "particleBuffer", particleBuffer);
         computeShader.SetBuffer(kernelInitParticles, "torqueAccumBuffer", torqueAccumBuffer);
         computeShader.Dispatch(kernelInitParticles, Mathf.CeilToInt(particleCount / 64f), 1, 1);
-        
+
+        Debug.Log($"Initialized {initialParticleCount} particles."); // Trace particle count
+
         // Explicitly set the initial mode for the first particle
         if (genome != null && genome.modes.Count > 0)
         {
@@ -465,26 +538,26 @@ public class ParticleSystemController : MonoBehaviour
             Particle[] firstParticle = new Particle[1];
             particleBuffer.GetData(firstParticle, 0, 0, 1);
             firstParticle[0].modeIndex = initialModeIndex;
-            
+
             particleBuffer.SetData(firstParticle, 0, 0, 1);
+            Debug.Log($"Set initial mode index for the first particle: {initialModeIndex}"); // Trace mode index
         }
-        
+
         if (cellSplitTimers == null || cellSplitTimers.Length < particleCount)
         {
             cellSplitTimers = new float[particleCount];
         }
-        
+
         for (int i = 0; i < particleCount; i++)
         {
             if (genome != null && i < activeParticleCount)
             {
                 Particle[] particleData = new Particle[1];
                 particleBuffer.GetData(particleData, 0, i, 1);
-                
+
                 int modeIndex = particleData[0].modeIndex;
                 if (modeIndex >= 0 && modeIndex < genome.modes.Count)
                 {
-                    // Initialize all timers to 0 to allow for simultaneous splits
                     cellSplitTimers[i] = 0f;
                 }
                 else
@@ -497,6 +570,8 @@ public class ParticleSystemController : MonoBehaviour
                 cellSplitTimers[i] = 0f;
             }
         }
+
+        Debug.Log("Particle initialization completed."); // Trace end
     }
 
     private int GetInitialModeIndex()
@@ -661,6 +736,9 @@ public class ParticleSystemController : MonoBehaviour
         Vector3 velA = parentVelocity + splitDirWorld * splitVelocityMagnitude;
         Vector3 velB = parentVelocity - splitDirWorld * splitVelocityMagnitude;
 
+        // Extract the parent's unique ID for the children to reference
+        int parentUniqueID = particleIDs[parentIndex].uniqueID;
+
         CellSplitData splitData = new CellSplitData
         {
             parentIndex = parentIndex,
@@ -682,42 +760,101 @@ public class ParticleSystemController : MonoBehaviour
         if (pendingSplits.Count == 0)
             return;
 
+        // Calculate how many new particles we'll need (only +1 per split since we're reusing parent's slot)
+        int neededNewParticles = pendingSplits.Count;
+        
+        // Check if there's enough room for the new particles
+        if (activeParticleCount + neededNewParticles > particleCount)
+        {
+            // Calculate new size with growth factor to avoid frequent resizing
+            int newCapacity = Mathf.Max(activeParticleCount + neededNewParticles, particleCount * 2);
+            ResizeParticleBuffers(newCapacity);
+        }
+
         Particle[] particleData = new Particle[particleCount];
         particleBuffer.GetData(particleData);
 
+        // Ensure particleIDs array is initialized and large enough
+        if (particleIDs == null || particleIDs.Length < particleCount)
+        {
+            AdhesionConnections.ParticleIDData[] newParticleIDs = new AdhesionConnections.ParticleIDData[particleCount];
+            if (particleIDs != null)
+            {
+                System.Array.Copy(particleIDs, newParticleIDs, System.Math.Min(particleIDs.Length, particleCount));
+            }
+            particleIDs = newParticleIDs;
+            // Ensure first particle has valid ID if it wasn't set previously
+            if (activeParticleCount > 0 && particleIDs[0].childType == '\0')
+            {
+                particleIDs[0].parentID = 0;
+                particleIDs[0].uniqueID = 0;
+                particleIDs[0].childType = 'A';
+            }
+        }
+
         foreach (var split in pendingSplits)
         {
-            if (activeParticleCount + 1 > particleCount)
-            {
-                Debug.LogWarning("Cannot process split - reached maximum cell count");
-                break;
-            }
-
             int parentIndex = split.parentIndex;
             
-            // Update parent (Child A) with new position, velocity, rotation, and mode
-            particleData[parentIndex].position = split.positionA;
-            particleData[parentIndex].velocity = split.velocityA;
-            particleData[parentIndex].rotation = split.rotationA;
-            particleData[parentIndex].modeIndex = split.childAModeIndex;
+            // Verify parent index is valid before accessing arrays
+            if (parentIndex < 0 || parentIndex >= particleCount)
+            {
+                Debug.LogWarning($"Invalid parent index: {parentIndex}. Skipping this split.");
+                continue;
+            }
+            
+            // Store parent's unique ID for children to reference
+            int originalParentID = particleIDs[parentIndex].uniqueID;
+            
+            // We'll reuse the parent's slot for Child A, and add Child B at the end
+            int childAIndex = parentIndex; // Reuse parent's slot
+            int childBIndex = activeParticleCount; // Add at the end
+            
+            // Use global counter for uniqueIDs to ensure they're never reused
+            int childAUniqueID = nextUniqueIDCounter++;
+            int childBUniqueID = nextUniqueIDCounter++;
+            
+            Debug.Log($"Cell split: Parent {originalParentID} → Children {childAUniqueID}(A) and {childBUniqueID}(B)");
 
-            // Create Child B at the active particle count index
-            int childBIndex = activeParticleCount;
-            particleData[childBIndex] = particleData[parentIndex]; // Copy properties from parent
+            // Overwrite parent with Child A
+            particleData[childAIndex].position = split.positionA;
+            particleData[childAIndex].velocity = split.velocityA;
+            particleData[childAIndex].rotation = split.rotationA;
+            particleData[childAIndex].modeIndex = split.childAModeIndex;
+            
+            // Set Child A's ID - using cell ID for genealogy rather than the index
+            particleIDs[childAIndex].parentID = originalParentID;
+            particleIDs[childAIndex].uniqueID = childAUniqueID;
+            particleIDs[childAIndex].childType = 'A';
+
+            // Create Child B (copy from parent data)
+            particleData[childBIndex] = particleData[childAIndex]; 
             particleData[childBIndex].position = split.positionB;
             particleData[childBIndex].velocity = split.velocityB;
             particleData[childBIndex].rotation = split.rotationB;
             particleData[childBIndex].modeIndex = split.childBModeIndex;
             
-            // Increment active particle count
-            activeParticleCount++;
-
-            // Initialize split timer for the new cell
-            if (childBIndex < cellSplitTimers.Length)
+            // Set Child B's ID - using cell ID for genealogy rather than the index
+            particleIDs[childBIndex].parentID = originalParentID;
+            particleIDs[childBIndex].uniqueID = childBUniqueID;
+            particleIDs[childBIndex].childType = 'B';
+            
+            // Initialize split timers for the new cells
+            if (cellSplitTimers == null || cellSplitTimers.Length < particleCount)
             {
-                // Set all timers to 0 to maintain synchronization
-                cellSplitTimers[childBIndex] = 0f;
+                float[] newSplitTimers = new float[particleCount];
+                if (cellSplitTimers != null)
+                {
+                    System.Array.Copy(cellSplitTimers, newSplitTimers, System.Math.Min(cellSplitTimers.Length, particleCount));
+                }
+                cellSplitTimers = newSplitTimers;
             }
+            
+            cellSplitTimers[childAIndex] = 0f;
+            cellSplitTimers[childBIndex] = 0f;
+            
+            // Increment active count by only 1 since we're reusing the parent's slot
+            activeParticleCount += 1;
         }
 
         // Write updated particle data back to the buffer
@@ -725,6 +862,9 @@ public class ParticleSystemController : MonoBehaviour
         
         // Clear pending splits after processing
         pendingSplits.Clear();
+        
+        // Log active particle count for debugging
+        Debug.Log($"Active particle count after splits: {activeParticleCount}");
     }
 
     private Vector3 GetDirection(float yaw, float pitch)
@@ -754,11 +894,24 @@ public class ParticleSystemController : MonoBehaviour
                 
                 r.GetData<Particle>().CopyTo(cachedParticleData);
                 
+                // Set cached data as valid
                 cachedParticleDataValid = true;
                 particleDataReadbackInProgress = false;
+                
+                // Check if we have both position and rotation data available
+                if (cpuParticlePositions != null && cpuParticleRotations != null && 
+                    cpuParticlePositions.Length > 0 && cpuParticleRotations.Length > 0)
+                {
+                    if (activeParticleCount > 0)
+                    {
+                        // Update adhesion connections immediately after getting fresh particle data
+                        SimulateAdhesionConnections();
+                    }
+                }
             });
         }
         
+        // Request position data
         AsyncGPUReadback.Request(positionReadbackBuffer, r => 
         {
             if (!r.hasError)
@@ -767,6 +920,7 @@ public class ParticleSystemController : MonoBehaviour
             }
         });
         
+        // Request rotation data
         AsyncGPUReadback.Request(rotationReadbackBuffer, r => 
         {
             if (!r.hasError)
@@ -781,6 +935,72 @@ public class ParticleSystemController : MonoBehaviour
     {
         float mag = Mathf.Sqrt(q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w);
         return !Mathf.Approximately(mag, 0f) && Mathf.Abs(mag - 1f) <= 0.01f;
+    }
+
+    // Resize particle buffers when more capacity is needed
+    private void ResizeParticleBuffers(int newCapacity)
+    {
+        Debug.Log($"Resizing particle buffers from {particleCount} to {newCapacity}");
+        
+        // Store old data
+        Particle[] oldParticleData = new Particle[particleCount];
+        particleBuffer.GetData(oldParticleData);
+        
+        AdhesionConnections.ParticleIDData[] oldIDData = new AdhesionConnections.ParticleIDData[particleCount];
+        if (particleIDs != null)
+        {
+            System.Array.Copy(particleIDs, oldIDData, particleCount);
+        }
+        
+        float[] oldSplitTimers = new float[particleCount];
+        if (cellSplitTimers != null)
+        {
+            System.Array.Copy(cellSplitTimers, oldSplitTimers, particleCount);
+        }
+        
+        // Release old buffers
+        ReleaseBuffers();
+        
+        // Update capacity
+        particleCount = newCapacity;
+        
+        // Reinitialize buffers with new capacity
+        InitializeBuffers();
+        
+        // Restore old data
+        Particle[] newParticleData = new Particle[particleCount];
+        System.Array.Copy(oldParticleData, newParticleData, oldParticleData.Length);
+        particleBuffer.SetData(newParticleData);
+        
+        // Restore particle IDs
+        particleIDs = new AdhesionConnections.ParticleIDData[particleCount];
+        System.Array.Copy(oldIDData, particleIDs, oldIDData.Length);
+        
+        // Restore split timers
+        cellSplitTimers = new float[particleCount];
+        System.Array.Copy(oldSplitTimers, cellSplitTimers, oldSplitTimers.Length);
+        
+        // Copy particle positions and rotations from CPU arrays to the new larger arrays
+        Vector3[] newPositions = new Vector3[particleCount];
+        Quaternion[] newRotations = new Quaternion[particleCount];
+        
+        if (cpuParticlePositions != null)
+        {
+            System.Array.Copy(cpuParticlePositions, newPositions, System.Math.Min(cpuParticlePositions.Length, particleCount));
+        }
+        
+        if (cpuParticleRotations != null)
+        {
+            System.Array.Copy(cpuParticleRotations, newRotations, System.Math.Min(cpuParticleRotations.Length, particleCount));
+        }
+        
+        cpuParticlePositions = newPositions;
+        cpuParticleRotations = newRotations;
+        
+        // Reinitialize particle labels with new count
+        InitializeParticleLabels();
+        
+        Debug.Log($"Successfully resized buffers to capacity {newCapacity}");
     }
 
     // Clear anchors when disabled
@@ -834,11 +1054,35 @@ public class ParticleSystemController : MonoBehaviour
         {
             var tmp = particleLabels[i];
             if (tmp == null) continue;
-            Vector3 pos = cpuParticlePositions[i] + Vector3.up * labelOffset;
+            
+            // Validate particle position before using it
+            Vector3 particlePos = cpuParticlePositions[i];
+            if (float.IsNaN(particlePos.x) || float.IsNaN(particlePos.y) || float.IsNaN(particlePos.z))
+            {
+                tmp.enabled = false;
+                continue; // Skip this label if the position contains NaN
+            }
+            
+            // Position labels slightly lower than before by adding a small negative Y offset
+            Vector3 pos = particlePos + (Vector3.up * labelOffset * 0.5f);
+            
+            // Additional validation before setting the position
+            if (float.IsNaN(pos.x) || float.IsNaN(pos.y) || float.IsNaN(pos.z))
+            {
+                tmp.enabled = false;
+                continue;
+            }
+            
             tmp.transform.position = pos;
             tmp.transform.rotation = Camera.main.transform.rotation;
             string text = "";
-            if (showParticleIds) text = $"ID: {i}";
+            
+            // Use the formatted ID instead of simple array index
+            if (showParticleIds && particleIDs != null && i < particleIDs.Length) 
+            {
+                text = particleIDs[i].GetFormattedID();
+            }
+            
             if (showParticleModes && cachedParticleDataValid)
             {
                 int modeIndex = cachedParticleData[i].modeIndex;
