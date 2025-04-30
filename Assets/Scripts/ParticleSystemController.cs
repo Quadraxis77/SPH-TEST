@@ -197,6 +197,31 @@ public class ParticleSystemController : MonoBehaviour
     {
         Debug.Log("SimulateAdhesionConnections method is being executed.");
         
+        // Validate that we have the required data before attempting to create connections
+        if (cpuParticlePositions == null || cpuParticleRotations == null || 
+            activeParticleCount <= 0 || particleIDs == null)
+        {
+            Debug.LogWarning("Cannot create adhesion connections: missing required data.");
+            return;
+        }
+        
+        // Additional validation for the data arrays
+        for (int i = 0; i < activeParticleCount; i++)
+        {
+            if (i >= cpuParticlePositions.Length || i >= cpuParticleRotations.Length || i >= particleIDs.Length)
+            {
+                Debug.LogWarning("Cannot create adhesion connections: data array length mismatch.");
+                return;
+            }
+            
+            // Validate positions
+            if (float.IsNaN(cpuParticlePositions[i].x) || float.IsInfinity(cpuParticlePositions[i].x))
+            {
+                Debug.LogWarning($"Invalid position data for particle {i}: {cpuParticlePositions[i]}");
+                // Continue anyway, the CreateAdhesionsFromParticles method will filter these out
+            }
+        }
+        
         // Use AdhesionConnections class methods to generate connections
         float maxBondDistance = maxRadius * adhesionConnectionDistance;
         var (cells, bonds) = AdhesionConnections.CreateAdhesionsFromParticles(
@@ -206,6 +231,8 @@ public class ParticleSystemController : MonoBehaviour
             particleIDs,
             maxBondDistance
         );
+        
+        Debug.Log($"Created {cells.Count} cells and {bonds.Count} bonds.");
         
         // Update current cells and bonds
         currentCells = cells;
@@ -283,6 +310,17 @@ public class ParticleSystemController : MonoBehaviour
         computeShader.SetBuffer(kernelCopyRotations, "particleBuffer", particleBuffer);
         computeShader.SetBuffer(kernelCopyRotations, "rotationReadbackBuffer", rotationReadbackBuffer);
         computeShader.Dispatch(kernelCopyRotations, threadGroups, 1, 1);
+
+        // Immediate readback of position and rotation data for rendering
+        positionReadbackBuffer.GetData(cpuParticlePositions);
+        rotationReadbackBuffer.GetData(cpuParticleRotations);
+        
+        // Update adhesion connections every frame with fresh position data
+        if (activeParticleCount > 0 && currentBonds != null && currentBonds.Count > 0)
+        {
+            // Just update the visualization with current cell positions, don't recreate bonds
+            UpdateAdhesionConnectionsVisual();
+        }
 
         uint[] args = new uint[5];
         drawArgsBufferSpheres.GetData(args);
@@ -822,7 +860,7 @@ public class ParticleSystemController : MonoBehaviour
             particleData[childAIndex].rotation = split.rotationA;
             particleData[childAIndex].modeIndex = split.childAModeIndex;
             
-            // Set Child A's ID - using cell ID for genealogy rather than the index
+            // Set Child A's ID - using original parent's unique ID as the parent ID
             particleIDs[childAIndex].parentID = originalParentID;
             particleIDs[childAIndex].uniqueID = childAUniqueID;
             particleIDs[childAIndex].childType = 'A';
@@ -834,7 +872,7 @@ public class ParticleSystemController : MonoBehaviour
             particleData[childBIndex].rotation = split.rotationB;
             particleData[childBIndex].modeIndex = split.childBModeIndex;
             
-            // Set Child B's ID - using cell ID for genealogy rather than the index
+            // Set Child B's ID - using original parent's unique ID as the parent ID
             particleIDs[childBIndex].parentID = originalParentID;
             particleIDs[childBIndex].uniqueID = childBUniqueID;
             particleIDs[childBIndex].childType = 'B';
@@ -865,6 +903,9 @@ public class ParticleSystemController : MonoBehaviour
         
         // Log active particle count for debugging
         Debug.Log($"Active particle count after splits: {activeParticleCount}");
+        
+        // Since we've made cell splits, we should recreate adhesion connections
+        SimulateAdhesionConnections();
     }
 
     private Vector3 GetDirection(float yaw, float pitch)
@@ -1046,7 +1087,6 @@ public class ParticleSystemController : MonoBehaviour
                 foreach (var lbl in particleLabels) if (lbl != null) lbl.enabled = false;
             return;
         }
-        if (!cachedParticleDataValid && showParticleModes) return;
         if (Camera.main == null) return;
 
         int count = Mathf.Min(activeParticleCount, particleLabels.Length);
@@ -1083,15 +1123,6 @@ public class ParticleSystemController : MonoBehaviour
                 text = particleIDs[i].GetFormattedID();
             }
             
-            if (showParticleModes && cachedParticleDataValid)
-            {
-                int modeIndex = cachedParticleData[i].modeIndex;
-                if (modeIndex >= 0 && modeIndex < genome.modes.Count)
-                {
-                    if (text.Length > 0) text += "\n";
-                    text += genome.modes[modeIndex].modeName;
-                }
-            }
             tmp.text = text;
             tmp.enabled = true;
         }
@@ -1099,5 +1130,82 @@ public class ParticleSystemController : MonoBehaviour
         {
             if (particleLabels[i] != null) particleLabels[i].enabled = false;
         }
+    }
+
+    // Update adhesion connection positions with the latest particle positions
+    private void UpdateAdhesionConnectionsVisual()
+    {
+        if (adhesionLineRenderer == null || currentCells == null || currentBonds == null || currentBonds.Count == 0)
+        {
+            return;
+        }
+        
+        // Now update the line renderer with positions directly from the current particle positions
+        List<(Vector3, Vector3)> validBondPositions = new List<(Vector3, Vector3)>();
+        
+        foreach (var bond in currentBonds)
+        {
+            // Basic bond validation: check if indices are in range
+            if (bond.A >= 0 && bond.A < activeParticleCount && 
+                bond.B >= 0 && bond.B < activeParticleCount)
+            {
+                // Ensure all connections follow our rules
+                if (particleIDs != null && bond.A < particleIDs.Length && bond.B < particleIDs.Length)
+                {
+                    bool isSibling = particleIDs[bond.A].parentID == particleIDs[bond.B].parentID;
+                    bool isSameType = particleIDs[bond.A].childType == particleIDs[bond.B].childType;
+                    
+                    // Only allow connections that are siblings OR same type
+                    if (!isSibling && !isSameType)
+                    {
+                        // Skip invalid connections
+                        continue;
+                    }
+
+                    // Debug log to confirm connections
+                    if (isSibling)
+                    {
+                        Debug.Log($"Visualizing sibling bond: {particleIDs[bond.A].GetFormattedID()} - {particleIDs[bond.B].GetFormattedID()} with parent {particleIDs[bond.A].parentID}");
+                    }
+                }
+                
+                Vector3 posA = cpuParticlePositions[bond.A];
+                Vector3 posB = cpuParticlePositions[bond.B];
+                
+                // Validate both positions
+                if (IsValidPosition(posA) && IsValidPosition(posB))
+                {
+                    validBondPositions.Add((posA, posB));
+                }
+            }
+        }
+        
+        // If no valid bonds, disable the renderer and return
+        if (validBondPositions.Count == 0)
+        {
+            adhesionLineRenderer.enabled = false;
+            return;
+        }
+        
+        // Configure the line renderer with the filtered valid bonds
+        adhesionLineRenderer.positionCount = validBondPositions.Count * 2;
+        adhesionLineRenderer.startWidth = 0.05f; // Thicker lines for better visibility
+        adhesionLineRenderer.endWidth = 0.05f;
+        
+        int index = 0;
+        foreach (var (posA, posB) in validBondPositions)
+        {
+            adhesionLineRenderer.SetPosition(index++, posA);
+            adhesionLineRenderer.SetPosition(index++, posB);
+        }
+        
+        adhesionLineRenderer.enabled = true;
+    }
+
+    // Helper to check if a position is valid
+    private bool IsValidPosition(Vector3 position)
+    {
+        return !float.IsNaN(position.x) && !float.IsNaN(position.y) && !float.IsNaN(position.z) &&
+               !float.IsInfinity(position.x) && !float.IsInfinity(position.y) && !float.IsInfinity(position.z);
     }
 }

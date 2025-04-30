@@ -172,9 +172,46 @@ public class AdhesionConnections
         
         Debug.Log($"Created {cells.Count} cells from particle positions.");
         
-        // Create bonds based only on parent-child relationships, not proximity
+        // Create bonds based on strictly enforced rules
         if (particleIDs != null)
         {
+            // First create a dictionary mapping unique IDs to particle indices to quickly find siblings
+            var parentToChildren = new Dictionary<int, List<int>>();
+            
+            for (int i = 0; i < activeParticleCount; i++)
+            {
+                if (!cells.ContainsKey(i)) continue;
+                
+                int parentID = particleIDs[i].parentID;
+                if (!parentToChildren.ContainsKey(parentID))
+                {
+                    parentToChildren[parentID] = new List<int>();
+                }
+                parentToChildren[parentID].Add(i);
+            }
+            
+            // RULE 1: Sibling connections - particles that share the same parent
+            foreach (var parentID in parentToChildren.Keys)
+            {
+                var children = parentToChildren[parentID];
+                if (children.Count > 1)
+                {
+                    // Create bonds between all siblings (typically just A-B pairs)
+                    for (int i = 0; i < children.Count; i++)
+                    {
+                        for (int j = i + 1; j < children.Count; j++)
+                        {
+                            int childA = children[i];
+                            int childB = children[j];
+                            
+                            Debug.Log($"Creating sibling bond between {particleIDs[childA].GetFormattedID()} and {particleIDs[childB].GetFormattedID()}");
+                            bonds.Add(new Bond(childA, childB));
+                        }
+                    }
+                }
+            }
+            
+            // RULE 2: Same-type connections - A-A or B-B but not cross-type
             for (int i = 0; i < activeParticleCount; i++)
             {
                 if (!cells.ContainsKey(i)) continue;
@@ -183,11 +220,24 @@ public class AdhesionConnections
                 {
                     if (!cells.ContainsKey(j)) continue;
                     
-                    // Check if these particles are siblings (share the same parent)
-                    if (particleIDs[i].parentID == particleIDs[j].parentID && 
-                        particleIDs[i].parentID != 0) // Skip default value
+                    // SKIP if already connected as siblings
+                    if (particleIDs[i].parentID == particleIDs[j].parentID)
                     {
+                        continue; // Already connected as siblings
+                    }
+                    
+                    // Connect ONLY if same type (A-A or B-B)
+                    bool sameType = particleIDs[i].childType == particleIDs[j].childType;
+                    
+                    if (sameType)
+                    {
+                        Debug.Log($"Creating same-type bond between {particleIDs[i].GetFormattedID()} and {particleIDs[j].GetFormattedID()}");
                         bonds.Add(new Bond(i, j));
+                    }
+                    else
+                    {
+                        // Do not create bonds between different types unless they're siblings
+                        Debug.Log($"NOT creating bond between different types: {particleIDs[i].GetFormattedID()} and {particleIDs[j].GetFormattedID()}");
                     }
                 }
             }
@@ -214,10 +264,42 @@ public class AdhesionConnections
             return;
         }
 
-        // Configure the line renderer
-        lineRenderer.positionCount = bonds.Count * 2;
-        lineRenderer.startWidth = 0.02f;
-        lineRenderer.endWidth = 0.02f;
+        // First filter out any invalid bonds (where cells don't exist or positions are invalid)
+        List<(Vector3, Vector3)> validBondPositions = new List<(Vector3, Vector3)>();
+        
+        foreach (var bond in bonds)
+        {
+            if (cells.TryGetValue(bond.A, out var cellA) && cells.TryGetValue(bond.B, out var cellB))
+            {
+                // Validate both positions
+                if (IsValidPosition(cellA.Position) && IsValidPosition(cellB.Position))
+                {
+                    validBondPositions.Add((cellA.Position, cellB.Position));
+                    Debug.Log($"Valid bond between {bond.A} and {bond.B}: {cellA.Position} -> {cellB.Position}");
+                }
+                else
+                {
+                    Debug.LogWarning($"Invalid position in bond {bond.A} <-> {bond.B}: A={cellA.Position}, B={cellB.Position}");
+                }
+            }
+            else
+            {
+                Debug.LogWarning($"Failed to find cells for bond: {bond.A} <-> {bond.B}");
+            }
+        }
+        
+        // If no valid bonds, disable the renderer and return
+        if (validBondPositions.Count == 0)
+        {
+            Debug.LogWarning("No valid bond positions found to render");
+            lineRenderer.enabled = false;
+            return;
+        }
+        
+        // Configure the line renderer with the filtered valid bonds
+        lineRenderer.positionCount = validBondPositions.Count * 2;
+        lineRenderer.startWidth = 0.05f; // Increased width for better visibility
+        lineRenderer.endWidth = 0.05f;
         
         // Set color if material exists
         if (lineRenderer.material != null)
@@ -232,25 +314,21 @@ public class AdhesionConnections
         }
         
         int index = 0;
-
-        foreach (var bond in bonds)
+        foreach (var (posA, posB) in validBondPositions)
         {
-            Debug.Log($"Processing bond between {bond.A} and {bond.B}");
-
-            if (cells.TryGetValue(bond.A, out var cellA) && cells.TryGetValue(bond.B, out var cellB))
-            {
-                Debug.Log($"Setting LineRenderer positions: {cellA.Position} -> {cellB.Position}");
-                lineRenderer.SetPosition(index++, cellA.Position);
-                lineRenderer.SetPosition(index++, cellB.Position);
-            }
-            else
-            {
-                Debug.LogWarning($"Failed to find cells for bond: {bond.A} <-> {bond.B}");
-            }
+            lineRenderer.SetPosition(index++, posA);
+            lineRenderer.SetPosition(index++, posB);
         }
 
         lineRenderer.enabled = true;
-        Debug.Log("VisualizeConnections completed");
+        Debug.Log($"VisualizeConnections completed - rendered {validBondPositions.Count} bonds");
+    }
+    
+    // Helper method to check if a position is valid
+    private static bool IsValidPosition(Vector3 position)
+    {
+        return !float.IsNaN(position.x) && !float.IsNaN(position.y) && !float.IsNaN(position.z) &&
+               !float.IsInfinity(position.x) && !float.IsInfinity(position.y) && !float.IsInfinity(position.z);
     }
     
     // Structure for particle ID data - moved from ParticleSystemController
