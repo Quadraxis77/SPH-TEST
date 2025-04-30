@@ -3,19 +3,24 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Rendering;
 
+/// <summary>
+/// Handles the creation and management of adhesion connections between cells in a particle system.
+/// </summary>
 public class AdhesionConnections
 {
-    private static readonly float COS_CUTOFF = Mathf.Cos(Mathf.Deg2Rad * 92f); // cos(coneHalfAngle), half-angle of the adhesion cone
+    #region Data Structures
 
-    // New formatted ID structure - now blittable
+    /// <summary>
+    /// Structured ID format for particles that allows for parent-child relationship tracking
+    /// </summary>
     [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
     public struct FormattedID
     {
-        // Use fixed size arrays for string data (blittable)
+        // Fixed size array for blittable data structure
         [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.ByValArray, SizeConst = 8)]
         public byte[] ParentID;  // Parent ID as bytes (ASCII)
-        public int UniqueID;     // Unique non-reusable ID (already blittable)
-        public byte ChildType;   // 'A' or 'B' as a byte (ASCII) instead of char
+        public int UniqueID;     // Unique non-reusable ID
+        public byte ChildType;   // 'A' or 'B' as a byte (ASCII)
 
         public FormattedID(string parentID, int uniqueID, char childType)
         {
@@ -30,35 +35,40 @@ public class AdhesionConnections
             }
             
             UniqueID = uniqueID;
-            ChildType = (byte)childType; // Convert char to byte
+            ChildType = (byte)childType;
         }
 
         public override string ToString()
         {
-            // Convert byte array to string
             string parentStr = System.Text.Encoding.ASCII.GetString(ParentID).TrimEnd('\0');
             return $"{parentStr}.{UniqueID:00}.{(char)ChildType}";
         }
 
-        // Helper method to check if two cells have matching types
+        /// <summary>
+        /// Returns true if the two IDs have the same child type (both A or both B)
+        /// </summary>
         public static bool HaveMatchingTypes(FormattedID id1, FormattedID id2)
         {
             return id1.ChildType == id2.ChildType;
         }
         
-        // Helper method to get a readable string of the child type
+        /// <summary>
+        /// Returns the child type as a string
+        /// </summary>
         public static string GetTypeString(FormattedID id)
         {
             return ((char)id.ChildType).ToString();
         }
 
-        // Parse a formatted ID string back into its components
+        /// <summary>
+        /// Parse a formatted ID string into a FormattedID struct
+        /// </summary>
         public static FormattedID Parse(string formattedID)
         {
             string[] parts = formattedID.Split('.');
             if (parts.Length < 3)
             {
-                return new FormattedID("00", 0, 'A'); // Default if parsing fails
+                return new FormattedID("00", 0, 'A'); // Default
             }
             
             return new FormattedID(
@@ -69,39 +79,51 @@ public class AdhesionConnections
         }
     }
 
+    /// <summary>
+    /// Represents a cell in the simulation
+    /// </summary>
     public struct Cell
     {
         public Vector3 Position;
         public Vector3 Heading;
         public int Generation;
         public int ID;
-        public FormattedID FormattedID; // Add formatted ID
-        public bool MakeAdhesion;  // Parent's Make Adhesion flag
-        public bool KeepAdhesion;  // Child's Keep Adhesion flag
-        public Vector3 SplitPlaneNormal; // Normal of the parent's splitting plane in local space
+        public FormattedID FormattedID;
+        public bool CanFormAdhesion;  // Whether this cell can form new adhesion bonds
+        public char Type => (char)FormattedID.ChildType;  // Convenience property to get child type
 
-        public Cell(Vector3 position, Vector3 heading, int generation, int id, FormattedID formattedID, bool makeAdhesion = true, bool keepAdhesion = true, Vector3 splitPlaneNormal = default(Vector3))
+        public Cell(Vector3 position, Vector3 heading, int generation, int id, FormattedID formattedID, bool canFormAdhesion = true)
         {
             Position = position;
             Heading = heading.normalized;
             Generation = generation;
             ID = id;
             FormattedID = formattedID;
-            MakeAdhesion = makeAdhesion;
-            KeepAdhesion = keepAdhesion;
-            SplitPlaneNormal = splitPlaneNormal == default(Vector3) ? Vector3.up : splitPlaneNormal.normalized;
+            CanFormAdhesion = canFormAdhesion;
         }
     }
 
+    /// <summary>
+    /// Represents an adhesion bond between two cells
+    /// </summary>
     public struct Bond
     {
         public int A;
         public int B;
+        public BondType Type;
 
-        public Bond(int a, int b)
+        public enum BondType
         {
+            Sibling,  // Bond between cells from the same parent
+            SameType  // Bond between same-type cells (A-A or B-B)
+        }
+
+        public Bond(int a, int b, BondType type)
+        {
+            // Always store indices in ascending order for consistent hash codes
             A = Mathf.Min(a, b);
             B = Mathf.Max(a, b);
+            Type = type;
         }
 
         public override bool Equals(object obj)
@@ -118,220 +140,9 @@ public class AdhesionConnections
         }
     }
 
-    // New method to create adhesion connections based on particle data
-    public static (Dictionary<int, Cell>, HashSet<Bond>) CreateAdhesionsFromParticles(
-        Vector3[] particlePositions,
-        Quaternion[] particleRotations,
-        int activeParticleCount,
-        ParticleIDData[] particleIDs,
-        float maxConnectionDistance)
-    {
-        Debug.Log("Creating adhesion connections from particle data");
-
-        // Don't run if we don't have particle positions yet
-        if (particlePositions == null || particlePositions.Length == 0 || activeParticleCount <= 0)
-        {
-            Debug.LogWarning("Cannot create adhesion connections: no particle positions available.");
-            return (new Dictionary<int, Cell>(), new HashSet<Bond>());
-        }
-
-        var cells = new Dictionary<int, Cell>();
-        var bonds = new HashSet<Bond>();
-
-        // Create cells for each active particle using their actual positions
-        for (int i = 0; i < activeParticleCount; i++)
-        {
-            if (i >= particlePositions.Length) break;
-            
-            // Skip invalid positions
-            if (float.IsNaN(particlePositions[i].x) || float.IsInfinity(particlePositions[i].x))
-                continue;
-            
-            // Create a cell based on this particle's real position and ID
-            Cell cell = new Cell
-            {
-                ID = i,
-                Position = particlePositions[i],
-                Heading = particleRotations[i] * Vector3.forward,
-                Generation = 0  // All particles are treated as generation 0 for simplicity
-            };
-
-            // If particle IDs are available, set the formatted ID
-            if (particleIDs != null && i < particleIDs.Length)
-            {
-                // Create formatted ID from particleIDs data
-                cell.FormattedID = new FormattedID(
-                    particleIDs[i].parentID.ToString("00"),
-                    particleIDs[i].uniqueID,
-                    particleIDs[i].childType
-                );
-            }
-            
-            cells[i] = cell;
-        }
-        
-        Debug.Log($"Created {cells.Count} cells from particle positions.");
-        
-        // Create bonds based on strictly enforced rules
-        if (particleIDs != null)
-        {
-            // First create a dictionary mapping unique IDs to particle indices to quickly find siblings
-            var parentToChildren = new Dictionary<int, List<int>>();
-            
-            for (int i = 0; i < activeParticleCount; i++)
-            {
-                if (!cells.ContainsKey(i)) continue;
-                
-                int parentID = particleIDs[i].parentID;
-                if (!parentToChildren.ContainsKey(parentID))
-                {
-                    parentToChildren[parentID] = new List<int>();
-                }
-                parentToChildren[parentID].Add(i);
-            }
-            
-            // RULE 1: Sibling connections - particles that share the same parent
-            foreach (var parentID in parentToChildren.Keys)
-            {
-                var children = parentToChildren[parentID];
-                if (children.Count > 1)
-                {
-                    // Create bonds between all siblings (typically just A-B pairs)
-                    for (int i = 0; i < children.Count; i++)
-                    {
-                        for (int j = i + 1; j < children.Count; j++)
-                        {
-                            int childA = children[i];
-                            int childB = children[j];
-                            
-                            Debug.Log($"Creating sibling bond between {particleIDs[childA].GetFormattedID()} and {particleIDs[childB].GetFormattedID()}");
-                            bonds.Add(new Bond(childA, childB));
-                        }
-                    }
-                }
-            }
-            
-            // RULE 2: Same-type connections - A-A or B-B but not cross-type
-            for (int i = 0; i < activeParticleCount; i++)
-            {
-                if (!cells.ContainsKey(i)) continue;
-                
-                for (int j = i + 1; j < activeParticleCount; j++)
-                {
-                    if (!cells.ContainsKey(j)) continue;
-                    
-                    // SKIP if already connected as siblings
-                    if (particleIDs[i].parentID == particleIDs[j].parentID)
-                    {
-                        continue; // Already connected as siblings
-                    }
-                    
-                    // Connect ONLY if same type (A-A or B-B)
-                    bool sameType = particleIDs[i].childType == particleIDs[j].childType;
-                    
-                    if (sameType)
-                    {
-                        Debug.Log($"Creating same-type bond between {particleIDs[i].GetFormattedID()} and {particleIDs[j].GetFormattedID()}");
-                        bonds.Add(new Bond(i, j));
-                    }
-                    else
-                    {
-                        // Do not create bonds between different types unless they're siblings
-                        Debug.Log($"NOT creating bond between different types: {particleIDs[i].GetFormattedID()} and {particleIDs[j].GetFormattedID()}");
-                    }
-                }
-            }
-        }
-        
-        Debug.Log($"Final count: {cells.Count} cells and {bonds.Count} bonds.");
-        return (cells, bonds);
-    }
-    
-    // New method to visualize adhesion connections using LineRenderer
-    public static void VisualizeConnections(
-        LineRenderer lineRenderer,
-        Dictionary<int, Cell> cells, 
-        HashSet<Bond> bonds,
-        Color bondColor)
-    {
-        Debug.Log("VisualizeConnections started");
-
-        if (bonds.Count == 0 || lineRenderer == null)
-        {
-            Debug.Log("No bonds to visualize or missing LineRenderer");
-            if (lineRenderer != null)
-                lineRenderer.enabled = false;
-            return;
-        }
-
-        // First filter out any invalid bonds (where cells don't exist or positions are invalid)
-        List<(Vector3, Vector3)> validBondPositions = new List<(Vector3, Vector3)>();
-        
-        foreach (var bond in bonds)
-        {
-            if (cells.TryGetValue(bond.A, out var cellA) && cells.TryGetValue(bond.B, out var cellB))
-            {
-                // Validate both positions
-                if (IsValidPosition(cellA.Position) && IsValidPosition(cellB.Position))
-                {
-                    validBondPositions.Add((cellA.Position, cellB.Position));
-                    Debug.Log($"Valid bond between {bond.A} and {bond.B}: {cellA.Position} -> {cellB.Position}");
-                }
-                else
-                {
-                    Debug.LogWarning($"Invalid position in bond {bond.A} <-> {bond.B}: A={cellA.Position}, B={cellB.Position}");
-                }
-            }
-            else
-            {
-                Debug.LogWarning($"Failed to find cells for bond: {bond.A} <-> {bond.B}");
-            }
-        }
-        
-        // If no valid bonds, disable the renderer and return
-        if (validBondPositions.Count == 0)
-        {
-            Debug.LogWarning("No valid bond positions found to render");
-            lineRenderer.enabled = false;
-            return;
-        }
-        
-        // Configure the line renderer with the filtered valid bonds
-        lineRenderer.positionCount = validBondPositions.Count * 2;
-        lineRenderer.startWidth = 0.05f; // Increased width for better visibility
-        lineRenderer.endWidth = 0.05f;
-        
-        // Set color if material exists
-        if (lineRenderer.material != null)
-        {
-            lineRenderer.material.color = bondColor;
-        }
-        else
-        {
-            // Create a default material if none exists
-            lineRenderer.material = new Material(Shader.Find("Sprites/Default"));
-            lineRenderer.material.color = bondColor;
-        }
-        
-        int index = 0;
-        foreach (var (posA, posB) in validBondPositions)
-        {
-            lineRenderer.SetPosition(index++, posA);
-            lineRenderer.SetPosition(index++, posB);
-        }
-
-        lineRenderer.enabled = true;
-        Debug.Log($"VisualizeConnections completed - rendered {validBondPositions.Count} bonds");
-    }
-    
-    // Helper method to check if a position is valid
-    private static bool IsValidPosition(Vector3 position)
-    {
-        return !float.IsNaN(position.x) && !float.IsNaN(position.y) && !float.IsNaN(position.z) &&
-               !float.IsInfinity(position.x) && !float.IsInfinity(position.y) && !float.IsInfinity(position.z);
-    }
-    
-    // Structure for particle ID data - moved from ParticleSystemController
+    /// <summary>
+    /// Data structure for particle ID data
+    /// </summary>
     public struct ParticleIDData
     {
         public int parentID;
@@ -344,268 +155,277 @@ public class AdhesionConnections
         }
     }
 
-    public static (Dictionary<int, Cell>, HashSet<Bond>) Simulate(
-        int nGenerations, 
-        Func<Cell, int, Vector3> childSplitPlaneNormalFn,  // Function to get split plane normal for each child
-        Func<Cell, int, Vector3> childForwardDirectionFn,  // Function to get forward direction for each child
-        Func<Cell, int, bool> childMakeAdhesionFn,         // Function to get MakeAdhesion flag for each child
-        Func<Cell, int, bool> childKeepAdhesionFn          // Function to get KeepAdhesion flag for each child
-    )
+    #endregion
+
+    #region Connection Creation
+
+    /// <summary>
+    /// Creates adhesion connections between particles based on their positions, rotations, and IDs
+    /// </summary>
+    public static (Dictionary<int, Cell>, HashSet<Bond>) CreateAdhesionsFromParticles(
+        Vector3[] particlePositions,
+        Quaternion[] particleRotations,
+        int activeParticleCount,
+        ParticleIDData[] particleIDs,
+        float maxConnectionDistance)
     {
-        // Initialize with a single seed cell facing +X
-        var cells = new Dictionary<int, Cell> { 
-            { 0, new Cell(Vector3.zero, Vector3.right, 0, 0, new FormattedID("00", 0, 'A'), true, true, Vector3.up) } 
-        };
-        var bonds = new HashSet<Bond>();
-        int nextID = 1;
-
-        for (int gen = 1; gen <= nGenerations; gen++)
+        if (particlePositions == null || particlePositions.Length == 0 || activeParticleCount <= 0)
         {
-            Debug.Log($"Processing generation {gen}");
-            var oldBonds = new List<Bond>(bonds);
-            bonds.Clear();
-            var parents = new List<Cell>();
-
-            // Collect parents of this generation
-            foreach (var cell in cells.Values)
-            {
-                if (cell.Generation == gen - 1)
-                {
-                    parents.Add(cell);
-                }
-            }
-
-            var spawnMap = new Dictionary<int, (Cell, Cell)>();
-            var parentCellsToRemove = new List<int>();
-
-            // 1) Split each parent into two children
-            foreach (var parent in parents)
-            {
-                // Get the split plane normal in parent's local space
-                Vector3 splitPlaneNormal = childSplitPlaneNormalFn(parent, 0);
-                
-                // Create orthogonal basis for splitting
-                Vector3 parentHeading = parent.Heading;
-                Vector3 splitDir = Vector3.Cross(parentHeading, splitPlaneNormal).normalized;
-
-                // Child positions (could use configurable overlap)
-                Vector3 posA = parent.Position + splitDir;
-                Vector3 posB = parent.Position - splitDir;
-
-                // Child forward directions in parent's local space
-                Vector3 forwardA = childForwardDirectionFn(parent, 0);
-                Vector3 forwardB = childForwardDirectionFn(parent, 1);
-
-                // Make adhesion flags for each child
-                bool makeAdhesionA = childMakeAdhesionFn(parent, 0);
-                bool makeAdhesionB = childMakeAdhesionFn(parent, 1);
-
-                // Keep adhesion flags for each child
-                bool keepAdhesionA = childKeepAdhesionFn(parent, 0);
-                bool keepAdhesionB = childKeepAdhesionFn(parent, 1);
-
-                // Create child cells
-                var childA = new Cell(
-                    posA,
-                    forwardA,
-                    gen,
-                    nextID++,
-                    new FormattedID(parent.FormattedID.UniqueID.ToString("00"), nextID-1, 'A'), // Use parent's unique ID as origin
-                    makeAdhesionA,
-                    keepAdhesionA,
-                    splitPlaneNormal
-                );
-                
-                var childB = new Cell(
-                    posB,
-                    forwardB,
-                    gen,
-                    nextID++,
-                    new FormattedID(parent.FormattedID.UniqueID.ToString("00"), nextID-1, 'B'), // Use parent's unique ID as origin
-                    makeAdhesionB,
-                    keepAdhesionB,
-                    splitPlaneNormal
-                );
-
-                cells[childA.ID] = childA;
-                cells[childB.ID] = childB;
-                spawnMap[parent.ID] = (childA, childB);
-                
-                // 1️⃣ Sibling bond - create exactly one bond between A and B if parent's makeAdhesion is true
-                if (parent.MakeAdhesion)
-                {
-                    Debug.Log($"Creating sibling bond between {childA.ID} and {childB.ID}");
-                    bonds.Add(new Bond(childA.ID, childB.ID));
-                }
-                
-                // Add parent to removal list instead of removing immediately
-                parentCellsToRemove.Add(parent.ID);
-            }
-            
-            // Process all newly created child cells for potential bonds with other new children
-            foreach (var parentID1 in spawnMap.Keys)
-            {
-                var (childA1, childB1) = spawnMap[parentID1];
-                
-                foreach (var parentID2 in spawnMap.Keys)
-                {
-                    // Skip self-bonds
-                    if (parentID1 == parentID2) continue;
-                    
-                    var (childA2, childB2) = spawnMap[parentID2];
-                    
-                    // Check for bonds between new children from different parents
-                    TryCreateChildBond(childA1, childA2, bonds);
-                    TryCreateChildBond(childA1, childB2, bonds);
-                    TryCreateChildBond(childB1, childA2, bonds);
-                    TryCreateChildBond(childB1, childB2, bonds);
-                }
-            }
-            
-            // 2️⃣ Inherit bonds from Parent→Neighbor
-            foreach (var oldBond in oldBonds)
-            {
-                Debug.Log($"Processing old bond: {oldBond.A} <-> {oldBond.B}");
-                int parentID = oldBond.A;
-                int neighborID = oldBond.B;
-                
-                // Case 1: Both cells were parents that split
-                if (spawnMap.TryGetValue(parentID, out var parentChildren) && 
-                    spawnMap.TryGetValue(neighborID, out var neighborChildren))
-                {
-                    var (parentChildA, parentChildB) = parentChildren;
-                    var (neighborChildA, neighborChildB) = neighborChildren;
-                    
-                    // Inherit bonds between corresponding same-type children, comparing types properly
-                    if (parentChildA.KeepAdhesion && neighborChildA.KeepAdhesion && 
-                        FormattedID.HaveMatchingTypes(parentChildA.FormattedID, neighborChildA.FormattedID))
-                     {
-                        Debug.Log($"Inheriting A-A bond between {parentChildA.ID}(type:{FormattedID.GetTypeString(parentChildA.FormattedID)}) and {neighborChildA.ID}(type:{FormattedID.GetTypeString(neighborChildA.FormattedID)})");
-                         bonds.Add(new Bond(parentChildA.ID, neighborChildA.ID));
-                     }
-                    if (parentChildB.KeepAdhesion && neighborChildB.KeepAdhesion && 
-                        FormattedID.HaveMatchingTypes(parentChildB.FormattedID, neighborChildB.FormattedID))
-                     {
-                        Debug.Log($"Inheriting B-B bond between {parentChildB.ID}(type:{FormattedID.GetTypeString(parentChildB.FormattedID)}) and {neighborChildB.ID}(type:{FormattedID.GetTypeString(neighborChildB.FormattedID)})");
-                         bonds.Add(new Bond(parentChildB.ID, neighborChildB.ID));
-                     }
-                    continue;
-                }
-                
-                // Case 2: First cell was a parent that split
-                if (spawnMap.TryGetValue(parentID, out parentChildren))
-                {
-                    Debug.Log($"First end of bond (ID: {parentID}) was a parent that split, second end (ID: {neighborID}) remains");
-                    var (childA, childB) = parentChildren;
-                    
-                    // Get the neighbor cell to check its type
-                    if (cells.TryGetValue(neighborID, out Cell neighborCell))
-                    {
-                        char neighborType = (char)neighborCell.FormattedID.ChildType;
-                        char childAType = (char)childA.FormattedID.ChildType;
-                        char childBType = (char)childB.FormattedID.ChildType;
-                        
-                        // Test A: Check if child A should inherit the bond
-                        if (childA.KeepAdhesion && childAType == neighborType) // Only keep bonds between same types
-                        {
-                            // Angle requirement commented out for testing
-                            // float dotA = Vector3.Dot(childA.Heading, childA.SplitPlaneNormal);
-                            Debug.Log($"Child A (ID: {childA.ID}, type: {childAType}) inherits bond to neighbor (ID: {neighborID}, type: {neighborType})");
-                            bonds.Add(new Bond(childA.ID, neighborID));
-                        }
-
-                        // Test B: Check if child B should inherit the bond
-                        if (childB.KeepAdhesion && childBType == neighborType)
-                        {
-                            // Angle requirement commented out for testing
-                            // float dotB = Vector3.Dot(childB.Heading, childB.SplitPlaneNormal);
-                            Debug.Log($"Child B (ID: {childB.ID}, type: {childBType}) inherits bond to neighbor (ID: {neighborID}, type: {neighborType})");
-                            bonds.Add(new Bond(childB.ID, neighborID));
-                        }
-                    }
-                    continue;
-                }
-                
-                // Case 3: Second cell was a parent that split
-                if (spawnMap.TryGetValue(neighborID, out var neighborChildrenPair))
-                {
-                    Debug.Log($"Second end of bond (ID: {neighborID}) was a parent that split, first end (ID: {parentID}) remains");
-                    var (childA, childB) = neighborChildrenPair;
-                    
-                    // Get the parent cell to check its type
-                    if (cells.TryGetValue(parentID, out Cell parentCell))
-                    {
-                        char parentType = (char)parentCell.FormattedID.ChildType;
-                        char childAType = (char)childA.FormattedID.ChildType;
-                        char childBType = (char)childB.FormattedID.ChildType;
-                        
-                        // Test A: Check if child A should inherit the bond
-                        if (childA.KeepAdhesion && childAType == parentType) // Only keep bonds between same types
-                        {
-                            // Angle requirement commented out for testing
-                            // float dotA = Vector3.Dot(childA.Heading, childA.SplitPlaneNormal);
-                            Debug.Log($"Child A (ID: {childA.ID}, type: {childAType}) inherits bond to parent (ID: {parentID}, type: {parentType})");
-                            bonds.Add(new Bond(childA.ID, parentID));
-                        }
-                        
-                        // Test B: Check if child B should inherit the bond
-                        if (childB.KeepAdhesion && childBType == parentType) // Only keep bonds between same types
-                        {
-                            // Angle requirement commented out for testing
-                            // float dotB = Vector3.Dot(childB.Heading, childB.SplitPlaneNormal);
-                            Debug.Log($"Child B (ID: {childB.ID}, type: {childBType}) inherits bond to parent (ID: {parentID}, type: {parentType})");
-                            bonds.Add(new Bond(childB.ID, parentID));
-                        }
-                    }
-                    continue;
-                }
-                
-                // Case 4: Neither cell was a parent that split
-                if (cells.TryGetValue(parentID, out var cellP) && cells.TryGetValue(neighborID, out var cellN))
-                {
-                    char typeP = (char)cellP.FormattedID.ChildType;
-                    char typeN = (char)cellN.FormattedID.ChildType;
-                    if (typeP == typeN)
-                    {
-                        Debug.Log($"Neither end was split: keeping bond between {parentID}(type:{typeP}) and {neighborID}(type:{typeN})");
-                        bonds.Add(oldBond);
-                    }
-                }
-                continue;
-            }
-            
-            // Remove parents after processing all bonds
-            foreach (var parentID in parentCellsToRemove)
-            {
-                cells.Remove(parentID);
-            }
-            
-            Debug.Log($"Generation {gen} completed with {cells.Count} cells and {bonds.Count} bonds");
+            Debug.LogWarning("Cannot create adhesion connections: no particle positions available.");
+            return (new Dictionary<int, Cell>(), new HashSet<Bond>());
         }
 
+        var cells = new Dictionary<int, Cell>();
+        var bonds = new HashSet<Bond>();
+
+        // 1. Create cells from all valid particles
+        for (int i = 0; i < activeParticleCount; i++)
+        {
+            if (i >= particlePositions.Length) break;
+            
+            // Skip invalid positions
+            if (float.IsNaN(particlePositions[i].x) || float.IsInfinity(particlePositions[i].x))
+                continue;
+            
+            Cell cell = new Cell
+            {
+                ID = i,
+                Position = particlePositions[i],
+                Heading = particleRotations[i] * Vector3.forward,
+                Generation = 0,
+                CanFormAdhesion = true
+            };
+
+            // Set formatted ID if available
+            if (particleIDs != null && i < particleIDs.Length)
+            {
+                cell.FormattedID = new FormattedID(
+                    particleIDs[i].parentID.ToString("00"),
+                    particleIDs[i].uniqueID,
+                    particleIDs[i].childType
+                );
+            }
+            
+            cells[i] = cell;
+        }
+        
+        Debug.Log($"Created {cells.Count} cells from particle positions.");
+        
+        // 2. Create only strictly valid connections
+        if (particleIDs != null)
+        {
+            // Create a map of parent IDs to children for sibling connections
+            var parentToChildren = new Dictionary<int, List<int>>();
+            
+            // Populate the parent-to-children map
+            foreach (int cellID in cells.Keys)
+            {
+                int parentID = particleIDs[cellID].parentID;
+                if (!parentToChildren.ContainsKey(parentID))
+                {
+                    parentToChildren[parentID] = new List<int>();
+                }
+                parentToChildren[parentID].Add(cellID);
+            }
+            
+            // RULE 1: Create bonds between siblings (same parent)
+            foreach (var children in parentToChildren.Values)
+            {
+                if (children.Count > 1)
+                {
+                    // Only connect direct siblings (typically A-B pairs)
+                    for (int i = 0; i < children.Count; i++)
+                    {
+                        for (int j = i + 1; j < children.Count; j++)
+                        {
+                            int childA = children[i];
+                            int childB = children[j];
+                            
+                            // Add sibling bond
+                            bonds.Add(new Bond(childA, childB, Bond.BondType.Sibling));
+                            Debug.Log($"Created SIBLING bond between {particleIDs[childA].GetFormattedID()} and {particleIDs[childB].GetFormattedID()}");
+                        }
+                    }
+                }
+            }
+            
+            // RULE 2: Create bonds between same-type cells (A-A or B-B)
+            // Use a spatial grid for efficient neighbor finding
+            var cellGrid = CreateSpatialGrid(cells, maxConnectionDistance);
+            
+            foreach (int cellID in cells.Keys)
+            {
+                char cellType = particleIDs[cellID].childType;
+                Vector3 cellPos = cells[cellID].Position;
+                
+                // Find potential neighbors using the spatial grid
+                var potentialNeighbors = GetPotentialNeighbors(cellPos, cellGrid, maxConnectionDistance);
+                
+                foreach (int neighborID in potentialNeighbors)
+                {
+                    // Skip self and already processed pairs
+                    if (neighborID <= cellID) continue;
+                    
+                    // Skip if these are already siblings
+                    if (particleIDs[cellID].parentID == particleIDs[neighborID].parentID)
+                        continue;
+                    
+                    // Only connect same types (A-A or B-B)
+                    if (particleIDs[neighborID].childType == cellType)
+                    {
+                        // Check distance
+                        float distance = Vector3.Distance(cellPos, cells[neighborID].Position);
+                        if (distance <= maxConnectionDistance)
+                        {
+                            bonds.Add(new Bond(cellID, neighborID, Bond.BondType.SameType));
+                            Debug.Log($"Created SAME_TYPE bond between {particleIDs[cellID].GetFormattedID()} and {particleIDs[neighborID].GetFormattedID()}");
+                        }
+                    }
+                }
+            }
+        }
+        
+        Debug.Log($"Final results: {cells.Count} cells with {bonds.Count} adhesion bonds");
         return (cells, bonds);
     }
-    
-    // Helper method to try creating a bond between two child cells
-    private static void TryCreateChildBond(Cell childA, Cell childB, HashSet<Bond> bonds)
+
+    /// <summary>
+    /// Creates a spatial grid for more efficient neighbor finding
+    /// </summary>
+    private static Dictionary<Vector3Int, List<int>> CreateSpatialGrid(Dictionary<int, Cell> cells, float cellSize)
     {
-        // Always allow formation of new links (MakeAdhesion check)
-        if (childA.MakeAdhesion && childB.KeepAdhesion)
+        var grid = new Dictionary<Vector3Int, List<int>>();
+        
+        foreach (var kvp in cells)
         {
-            // Get cell types from FormattedIDs
-            char typeA = (char)childA.FormattedID.ChildType;
-            char typeB = (char)childB.FormattedID.ChildType;
-
-            // Only form new bonds between same cell types (A-A or B-B)
-            if (typeA != typeB)
-                return;
-
-            // Angle requirement commented out for testing
-            // float dotA = Vector3.Dot(childA.Heading, childA.SplitPlaneNormal);
-            // float dotB = Vector3.Dot(childB.Heading, childB.SplitPlaneNormal);
-
-            Debug.Log($"Creating new child-to-child bond between {childA.ID}(type:{typeA}) and {childB.ID}(type:{typeB})");
-            bonds.Add(new Bond(childA.ID, childB.ID));
+            int cellID = kvp.Key;
+            Vector3 position = kvp.Value.Position;
+            
+            // Get grid cell coordinate
+            Vector3Int gridCoord = new Vector3Int(
+                Mathf.FloorToInt(position.x / cellSize),
+                Mathf.FloorToInt(position.y / cellSize),
+                Mathf.FloorToInt(position.z / cellSize)
+            );
+            
+            // Add to grid
+            if (!grid.ContainsKey(gridCoord))
+            {
+                grid[gridCoord] = new List<int>();
+            }
+            grid[gridCoord].Add(cellID);
         }
+        
+        return grid;
     }
+
+    /// <summary>
+    /// Gets potential neighbors from the spatial grid
+    /// </summary>
+    private static HashSet<int> GetPotentialNeighbors(Vector3 position, Dictionary<Vector3Int, List<int>> grid, float cellSize)
+    {
+        var neighbors = new HashSet<int>();
+        Vector3Int gridPos = new Vector3Int(
+            Mathf.FloorToInt(position.x / cellSize),
+            Mathf.FloorToInt(position.y / cellSize),
+            Mathf.FloorToInt(position.z / cellSize)
+        );
+        
+        // Check current grid cell and adjacent cells (27 cells in 3D)
+        for (int x = -1; x <= 1; x++)
+        {
+            for (int y = -1; y <= 1; y++)
+            {
+                for (int z = -1; z <= 1; z++)
+                {
+                    Vector3Int checkPos = gridPos + new Vector3Int(x, y, z);
+                    if (grid.TryGetValue(checkPos, out List<int> cellsInGrid))
+                    {
+                        foreach (int cellID in cellsInGrid)
+                        {
+                            neighbors.Add(cellID);
+                        }
+                    }
+                }
+            }
+        }
+        
+        return neighbors;
+    }
+
+    #endregion
+
+    #region Visualization
+
+    /// <summary>
+    /// Visualizes adhesion connections using LineRenderer
+    /// </summary>
+    public static void VisualizeConnections(
+        LineRenderer lineRenderer,
+        Dictionary<int, Cell> cells, 
+        HashSet<Bond> bonds,
+        Color bondColor)
+    {
+        if (bonds.Count == 0 || lineRenderer == null)
+        {
+            if (lineRenderer != null)
+                lineRenderer.enabled = false;
+            return;
+        }
+
+        // Filter out invalid bonds
+        List<(Vector3, Vector3, Bond.BondType)> validBonds = new List<(Vector3, Vector3, Bond.BondType)>();
+        
+        foreach (var bond in bonds)
+        {
+            if (cells.TryGetValue(bond.A, out var cellA) && cells.TryGetValue(bond.B, out var cellB))
+            {
+                // Only include bonds with valid positions
+                if (IsValidPosition(cellA.Position) && IsValidPosition(cellB.Position))
+                {
+                    validBonds.Add((cellA.Position, cellB.Position, bond.Type));
+                }
+            }
+        }
+        
+        // If no valid bonds, disable the renderer and return
+        if (validBonds.Count == 0)
+        {
+            lineRenderer.enabled = false;
+            return;
+        }
+        
+        // Configure the line renderer
+        lineRenderer.positionCount = validBonds.Count * 2;
+        lineRenderer.startWidth = 0.05f;
+        lineRenderer.endWidth = 0.05f;
+        
+        // Set color
+        if (lineRenderer.material == null)
+        {
+            lineRenderer.material = new Material(Shader.Find("Sprites/Default"));
+        }
+        lineRenderer.material.color = bondColor;
+        
+        // Set positions
+        int index = 0;
+        foreach (var (posA, posB, _) in validBonds)
+        {
+            lineRenderer.SetPosition(index++, posA);
+            lineRenderer.SetPosition(index++, posB);
+        }
+
+        lineRenderer.enabled = true;
+    }
+
+    /// <summary>
+    /// Checks if a Vector3 position is valid
+    /// </summary>
+    private static bool IsValidPosition(Vector3 position)
+    {
+        return !float.IsNaN(position.x) && !float.IsNaN(position.y) && !float.IsNaN(position.z) &&
+               !float.IsInfinity(position.x) && !float.IsInfinity(position.y) && !float.IsInfinity(position.z);
+    }
+
+    #endregion
 }
