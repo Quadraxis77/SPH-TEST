@@ -155,9 +155,62 @@ public class AdhesionConnections
         }
     }
 
+    // Data structure to store splitting information
+    public struct SplitInfo
+    {
+        public int parentID;
+        public Vector3 splitDirection;  // Normalized direction from child A to child B
+        public Vector3 splitPosition;   // Position where the split occurred (parent position)
+
+        public SplitInfo(int parentID, Vector3 splitDirection, Vector3 splitPosition)
+        {
+            this.parentID = parentID;
+            this.splitDirection = splitDirection.normalized;
+            this.splitPosition = splitPosition;
+        }
+    }
+
+    // Dictionary to track split information for each parent
+    private static Dictionary<int, SplitInfo> splitInfoMap = new Dictionary<int, SplitInfo>();
+
     #endregion
 
     #region Connection Creation
+
+    /// <summary>
+    /// Registers a cell division event to track split direction
+    /// </summary>
+    public static void RegisterCellDivision(int parentID, Vector3 parentPosition, Vector3 childAPosition, Vector3 childBPosition)
+    {
+        Vector3 splitDirection = (childBPosition - childAPosition).normalized;
+        splitInfoMap[parentID] = new SplitInfo(parentID, splitDirection, parentPosition);
+    }
+
+    /// <summary>
+    /// Determines which child should inherit a bond based on half-side check
+    /// </summary>
+    private static bool ShouldInheritBond(int parentID, int childID, Vector3 childPos, Vector3 neighborPos)
+    {
+        // If we don't have split info for this parent, both children inherit bonds
+        if (!splitInfoMap.TryGetValue(parentID, out SplitInfo splitInfo))
+        {
+            return true;
+        }
+
+        // Calculate vector from split position to neighbor
+        Vector3 toNeighbor = neighborPos - splitInfo.splitPosition;
+        
+        // Calculate vector from split position to child
+        Vector3 toChild = childPos - splitInfo.splitPosition;
+        
+        // Check if they're on the same side of the splitting plane
+        // Dot product will be positive if they're on the same side
+        float neighborSide = Vector3.Dot(toNeighbor, splitInfo.splitDirection);
+        float childSide = Vector3.Dot(toChild, splitInfo.splitDirection);
+        
+        // Child inherits bond if it's on the same side as the neighbor
+        return (neighborSide * childSide > 0);
+    }
 
     /// <summary>
     /// Creates adhesion connections between particles based on their positions, rotations, and IDs

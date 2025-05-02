@@ -56,7 +56,8 @@ public class ParticleSystemController : MonoBehaviour
 
     private LineRenderer circleRenderer;
     private LineRenderer lineRenderer;
-    private LineRenderer adhesionLineRenderer;
+
+    private List<LineRenderer> adhesionLineRenderers = new List<LineRenderer>();
 
     ComputeBuffer particleBuffer, dragInputBuffer, drawArgsBufferSpheres;
     ComputeBuffer positionReadbackBuffer, rotationReadbackBuffer;
@@ -179,15 +180,6 @@ public class ParticleSystemController : MonoBehaviour
         
         // Initialize particle labels
         InitializeParticleLabels();
-
-        // Initialize adhesion line renderer
-        GameObject adhesionLineObject = new GameObject("AdhesionLines");
-        adhesionLineRenderer = adhesionLineObject.AddComponent<LineRenderer>();
-        adhesionLineRenderer.startWidth = 0.02f;
-        adhesionLineRenderer.endWidth = 0.02f;
-        adhesionLineRenderer.material = new Material(Shader.Find("Sprites/Default"));
-        adhesionLineRenderer.material.color = adhesionLineColor;
-        adhesionLineRenderer.enabled = false;
         
         // Simulate and create adhesion connections at startup
         SimulateAdhesionConnections();
@@ -239,12 +231,7 @@ public class ParticleSystemController : MonoBehaviour
         currentBonds = bonds;
         
         // Visualize the connections
-        AdhesionConnections.VisualizeConnections(
-            adhesionLineRenderer,
-            currentCells,
-            currentBonds,
-            adhesionLineColor
-        );
+        UpdateAdhesionConnectionsVisual();
     }
 
     void Update()
@@ -520,7 +507,12 @@ public class ParticleSystemController : MonoBehaviour
 
         if (circleRenderer != null) Destroy(circleRenderer.gameObject);
         if (lineRenderer != null) Destroy(lineRenderer.gameObject);
-        if (adhesionLineRenderer != null) Destroy(adhesionLineRenderer.gameObject);
+        
+        foreach (var line in adhesionLineRenderers)
+        {
+            if (line != null) Destroy(line.gameObject);
+        }
+        adhesionLineRenderers.Clear();
         
         if (particleLabels != null)
         {
@@ -830,6 +822,10 @@ public class ParticleSystemController : MonoBehaviour
             }
         }
 
+        // Keep track of newly created particles so we can create labels for them later
+        List<int> newParticleIndices = new List<int>();
+        List<string> newParticleIds = new List<string>();
+
         foreach (var split in pendingSplits)
         {
             int parentIndex = split.parentIndex;
@@ -853,6 +849,14 @@ public class ParticleSystemController : MonoBehaviour
             int childBUniqueID = nextUniqueIDCounter++;
             
             Debug.Log($"Cell split: Parent {originalParentID} → Children {childAUniqueID}(A) and {childBUniqueID}(B)");
+
+            // Register this cell division with the AdhesionConnections class to track split direction
+            AdhesionConnections.RegisterCellDivision(
+                originalParentID, 
+                cpuParticlePositions[parentIndex], 
+                split.positionA, 
+                split.positionB
+            );
 
             // Overwrite parent with Child A
             particleData[childAIndex].position = split.positionA;
@@ -891,6 +895,15 @@ public class ParticleSystemController : MonoBehaviour
             cellSplitTimers[childAIndex] = 0f;
             cellSplitTimers[childBIndex] = 0f;
             
+            // Track the new particles for label creation
+            // Child A replaces the parent, so we need a label for it
+            newParticleIndices.Add(childAIndex);
+            newParticleIds.Add(particleIDs[childAIndex].GetFormattedID());
+            
+            // Child B is completely new and needs a label
+            newParticleIndices.Add(childBIndex);
+            newParticleIds.Add(particleIDs[childBIndex].GetFormattedID());
+            
             // Increment active count by only 1 since we're reusing the parent's slot
             activeParticleCount += 1;
         }
@@ -900,6 +913,9 @@ public class ParticleSystemController : MonoBehaviour
         
         // Clear pending splits after processing
         pendingSplits.Clear();
+        
+        // Create labels for the new particles
+        CreateLabelsForNewParticles(newParticleIndices, newParticleIds);
         
         // Log active particle count for debugging
         Debug.Log($"Active particle count after splits: {activeParticleCount}");
@@ -1063,9 +1079,23 @@ public class ParticleSystemController : MonoBehaviour
             GameObject labelsParent = new GameObject("ParticleLabels");
             labelsParent.transform.SetParent(transform);
             particleLabels = new TextMeshPro[particleCount];
-            for (int i = 0; i < particleCount; i++)
+            
+            // Only create actual GameObjects for active particles
+            // This saves memory and keeps the hierarchy clean
+            for (int i = 0; i < activeParticleCount; i++)
             {
-                GameObject labelObj = new GameObject($"Label_{i}");
+                // Create label name using particle ID if available, otherwise use index
+                string labelName;
+                if (particleIDs != null && i < particleIDs.Length && i < activeParticleCount)
+                {
+                    labelName = $"Label_{particleIDs[i].GetFormattedID()}";
+                }
+                else
+                {
+                    labelName = $"Label_{i}";
+                }
+                
+                GameObject labelObj = new GameObject(labelName);
                 labelObj.transform.SetParent(labelsParent.transform);
                 var tmp = labelObj.AddComponent<TextMeshPro>();
                 tmp.alignment = TextAlignmentOptions.Center;
@@ -1075,6 +1105,10 @@ public class ParticleSystemController : MonoBehaviour
                 tmp.enabled = false;
                 particleLabels[i] = tmp;
             }
+            
+            // The array still needs to be fully initialized to avoid null reference errors
+            // But we don't need to create GameObjects for inactive particles
+            Debug.Log($"Created {activeParticleCount} particle labels (out of {particleCount} capacity)");
         }
     }
 
@@ -1121,6 +1155,13 @@ public class ParticleSystemController : MonoBehaviour
             if (showParticleIds && particleIDs != null && i < particleIDs.Length) 
             {
                 text = particleIDs[i].GetFormattedID();
+                
+                // Update GameObject name to use the formatted ID for better hierarchy organization
+                string labelName = $"Label_{text}";
+                if (tmp.gameObject.name != labelName)
+                {
+                    tmp.gameObject.name = labelName;
+                }
             }
             
             tmp.text = text;
@@ -1135,71 +1176,132 @@ public class ParticleSystemController : MonoBehaviour
     // Update adhesion connection positions with the latest particle positions
     private void UpdateAdhesionConnectionsVisual()
     {
-        if (adhesionLineRenderer == null || currentCells == null || currentBonds == null || currentBonds.Count == 0)
+        if (currentCells == null || currentBonds == null || currentBonds.Count == 0)
         {
+            // Destroy all existing line renderers if no bonds exist
+            foreach (var line in adhesionLineRenderers)
+            {
+                if (line != null) Destroy(line.gameObject);
+            }
+            adhesionLineRenderers.Clear();
             return;
         }
-        
-        // Now update the line renderer with positions directly from the current particle positions
-        List<(Vector3, Vector3)> validBondPositions = new List<(Vector3, Vector3)>();
-        
-        foreach (var bond in currentBonds)
-        {
-            // Basic bond validation: check if indices are in range
-            if (bond.A >= 0 && bond.A < activeParticleCount && 
-                bond.B >= 0 && bond.B < activeParticleCount)
-            {
-                // Ensure all connections follow our rules
-                if (particleIDs != null && bond.A < particleIDs.Length && bond.B < particleIDs.Length)
-                {
-                    bool isSibling = particleIDs[bond.A].parentID == particleIDs[bond.B].parentID;
-                    bool isSameType = particleIDs[bond.A].childType == particleIDs[bond.B].childType;
-                    
-                    // Only allow connections that are siblings OR same type
-                    if (!isSibling && !isSameType)
-                    {
-                        // Skip invalid connections
-                        continue;
-                    }
 
-                    // Debug log to confirm connections
-                    if (isSibling)
-                    {
-                        Debug.Log($"Visualizing sibling bond: {particleIDs[bond.A].GetFormattedID()} - {particleIDs[bond.B].GetFormattedID()} with parent {particleIDs[bond.A].parentID}");
-                    }
-                }
-                
-                Vector3 posA = cpuParticlePositions[bond.A];
-                Vector3 posB = cpuParticlePositions[bond.B];
-                
-                // Validate both positions
-                if (IsValidPosition(posA) && IsValidPosition(posB))
-                {
-                    validBondPositions.Add((posA, posB));
-                }
+        // Create or get parent GameObject for adhesion connections
+        GameObject adhesionsParent = GameObject.Find("AdhesionConnections");
+        if (adhesionsParent == null)
+        {
+            adhesionsParent = new GameObject("AdhesionConnections");
+            adhesionsParent.transform.SetParent(transform);
+        }
+
+        // First, clean up any outdated line renderers - keep track of current valid bonds
+        HashSet<string> validBonds = new HashSet<string>();
+        
+        // Create this mapping for quick lookups in the update phase
+        Dictionary<string, int> idToIndexMap = new Dictionary<string, int>();
+        for (int i = 0; i < activeParticleCount; i++)
+        {
+            if (i < particleIDs.Length)
+            {
+                string id = particleIDs[i].GetFormattedID();
+                idToIndexMap[id] = i;
             }
         }
         
-        // If no valid bonds, disable the renderer and return
-        if (validBondPositions.Count == 0)
+        // Build valid bonds set using the current bond data
+        foreach (var bond in currentBonds)
         {
-            adhesionLineRenderer.enabled = false;
-            return;
+            if (bond.A >= 0 && bond.A < activeParticleCount && 
+                bond.B >= 0 && bond.B < activeParticleCount)
+            {
+                string idA = particleIDs[bond.A].GetFormattedID();
+                string idB = particleIDs[bond.B].GetFormattedID();
+                
+                // Create a consistent bond key (always put lower ID first to avoid duplicates)
+                string bondKey = string.Compare(idA, idB) < 0 ? 
+                    $"Bond_{idA}_to_{idB}" : 
+                    $"Bond_{idB}_to_{idA}";
+                
+                validBonds.Add(bondKey);
+            }
         }
         
-        // Configure the line renderer with the filtered valid bonds
-        adhesionLineRenderer.positionCount = validBondPositions.Count * 2;
-        adhesionLineRenderer.startWidth = 0.05f; // Thicker lines for better visibility
-        adhesionLineRenderer.endWidth = 0.05f;
-        
-        int index = 0;
-        foreach (var (posA, posB) in validBondPositions)
+        // Remove any line renderers that are not in the valid bonds set
+        for (int i = adhesionLineRenderers.Count - 1; i >= 0; i--)
         {
-            adhesionLineRenderer.SetPosition(index++, posA);
-            adhesionLineRenderer.SetPosition(index++, posB);
+            var line = adhesionLineRenderers[i];
+            if (line == null)
+            {
+                adhesionLineRenderers.RemoveAt(i);
+                continue;
+            }
+            
+            string name = line.gameObject.name;
+            if (!validBonds.Contains(name))
+            {
+                Destroy(line.gameObject);
+                adhesionLineRenderers.RemoveAt(i);
+            }
         }
-        
-        adhesionLineRenderer.enabled = true;
+
+        // Create new line renderers for any new bonds
+        foreach (var bond in currentBonds)
+        {
+            if (bond.A >= 0 && bond.A < activeParticleCount && 
+                bond.B >= 0 && bond.B < activeParticleCount)
+            {
+                Vector3 posA = cpuParticlePositions[bond.A];
+                Vector3 posB = cpuParticlePositions[bond.B];
+
+                if (IsValidPosition(posA) && IsValidPosition(posB))
+                {
+                    // Get formatted IDs for the particles in this bond
+                    string idA = particleIDs[bond.A].GetFormattedID();
+                    string idB = particleIDs[bond.B].GetFormattedID();
+                    
+                    // Create a consistent bond key (always put lower ID first to avoid duplicates)
+                    string bondKey = string.Compare(idA, idB) < 0 ? 
+                        $"Bond_{idA}_to_{idB}" : 
+                        $"Bond_{idB}_to_{idA}";
+                    
+                    // Store which actual particle indices correspond to which IDs for this bond
+                    int indexA = bond.A;
+                    int indexB = bond.B;
+                    
+                    // Check if this bond already exists
+                    bool bondExists = false;
+                    foreach (var line in adhesionLineRenderers)
+                    {
+                        if (line != null && line.gameObject.name == bondKey)
+                        {
+                            bondExists = true;
+                            line.SetPosition(0, posA);
+                            line.SetPosition(1, posB);
+                            break;
+                        }
+                    }
+                    
+                    // Create new bond if it doesn't exist
+                    if (!bondExists)
+                    {
+                        GameObject lineObject = new GameObject(bondKey);
+                        lineObject.transform.SetParent(adhesionsParent.transform);
+                        
+                        LineRenderer lineRenderer = lineObject.AddComponent<LineRenderer>();
+                        lineRenderer.startWidth = 0.05f;
+                        lineRenderer.endWidth = 0.05f;
+                        lineRenderer.material = new Material(Shader.Find("Sprites/Default"));
+                        lineRenderer.material.color = adhesionLineColor;
+                        lineRenderer.positionCount = 2;
+                        lineRenderer.SetPosition(0, posA);
+                        lineRenderer.SetPosition(1, posB);
+
+                        adhesionLineRenderers.Add(lineRenderer);
+                    }
+                }
+            }
+        }
     }
 
     // Helper to check if a position is valid
@@ -1207,5 +1309,56 @@ public class ParticleSystemController : MonoBehaviour
     {
         return !float.IsNaN(position.x) && !float.IsNaN(position.y) && !float.IsNaN(position.z) &&
                !float.IsInfinity(position.x) && !float.IsInfinity(position.y) && !float.IsInfinity(position.z);
+    }
+
+    private void CreateLabelsForNewParticles(List<int> indices, List<string> ids)
+    {
+        if (indices == null || ids == null || indices.Count != ids.Count)
+        {
+            Debug.LogWarning("Invalid input to CreateLabelsForNewParticles.");
+            return;
+        }
+
+        // Find or create the labels parent object
+        Transform labelsParent = transform.Find("ParticleLabels");
+        if (labelsParent == null)
+        {
+            GameObject labelsParentObj = new GameObject("ParticleLabels");
+            labelsParentObj.transform.SetParent(transform);
+            labelsParent = labelsParentObj.transform;
+        }
+
+        for (int i = 0; i < indices.Count; i++)
+        {
+            int index = indices[i];
+            string id = ids[i];
+
+            if (index < 0 || index >= particleLabels.Length)
+            {
+                Debug.LogWarning($"Invalid index {index} for new particle label.");
+                continue;
+            }
+
+            // We may already have a label at this index (especially for Child A which replaces parent)
+            // So we need to either update it or create a new one
+            if (particleLabels[index] != null)
+            {
+                particleLabels[index].gameObject.name = $"Label_{id}";
+            }
+            else
+            {
+                GameObject labelObj = new GameObject($"Label_{id}");
+                labelObj.transform.SetParent(labelsParent);
+                var tmp = labelObj.AddComponent<TextMeshPro>();
+                tmp.alignment = TextAlignmentOptions.Center;
+                tmp.fontSize = 3;
+                tmp.color = labelColor;
+                tmp.transform.localScale = Vector3.one * labelScale;
+                tmp.enabled = false;
+                particleLabels[index] = tmp;
+            }
+            
+            Debug.Log($"Created/updated label for particle at index {index} with ID {id}");
+        }
     }
 }
