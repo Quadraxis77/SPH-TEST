@@ -214,14 +214,21 @@ public class ParticleSystemController : MonoBehaviour
             }
         }
         
+        // Store the current bonds before creating new ones (to enable tracking inheritance)
+        if (currentBonds != null && currentBonds.Count > 0) 
+        {
+            Debug.Log($"Storing {currentBonds.Count} current bonds before generating new ones");
+            AdhesionConnections.SetCurrentBonds(this, currentBonds);
+        }
+        
         // Use AdhesionConnections class methods to generate connections
-        float maxBondDistance = maxRadius * adhesionConnectionDistance;
+        // We're not using maxBondDistance anymore - passing 0 as it will be ignored
         var (cells, bonds) = AdhesionConnections.CreateAdhesionsFromParticles(
             cpuParticlePositions,
             cpuParticleRotations,
             activeParticleCount,
             particleIDs,
-            maxBondDistance
+            0 // Distance threshold no longer used
         );
         
         Debug.Log($"Created {cells.Count} cells and {bonds.Count} bonds.");
@@ -1360,5 +1367,61 @@ public class ParticleSystemController : MonoBehaviour
             
             Debug.Log($"Created/updated label for particle at index {index} with ID {id}");
         }
+    }
+
+    /// <summary>
+    /// Gets the active genome mode for the current simulation
+    /// </summary>
+    public GenomeMode GetActiveGenomeMode()
+    {
+        if (genome == null || genome.modes.Count == 0)
+            return null;
+            
+        // Get the first particle's mode index
+        if (activeParticleCount > 0 && particleBuffer != null)
+        {
+            Particle[] particleData = new Particle[1];
+            particleBuffer.GetData(particleData, 0, 0, 1);
+            int modeIndex = particleData[0].modeIndex;
+            
+            if (modeIndex >= 0 && modeIndex < genome.modes.Count)
+            {
+                return genome.modes[modeIndex];
+            }
+        }
+        
+        // Fallback to the initial mode
+        return genome.modes.Find(m => m.isInitial) ?? genome.modes[0];
+    }
+
+    /// <summary>
+    /// Gets the genome mode for a specific particle by reading from the particle buffer
+    /// </summary>
+    public GenomeMode GetGenomeModeForParticle(int particleIndex)
+    {
+        if (genome == null || genome.modes.Count == 0 || particleIndex < 0 || particleIndex >= activeParticleCount)
+            return null;
+        
+        // Read the mode index from the particle data
+        Particle[] particleData = new Particle[1];
+        particleBuffer.GetData(particleData, 0, particleIndex, 1);
+        int modeIndex = particleData[0].modeIndex;
+        
+        // Make sure the mode index is valid
+        if (modeIndex >= 0 && modeIndex < genome.modes.Count)
+        {
+            return genome.modes[modeIndex];
+        }
+        
+        // If mode index is invalid, fall back to the initial mode
+        return genome.modes.Find(m => m.isInitial) ?? genome.modes[0];
+    }
+
+    /// <summary>
+    /// Gets the current particle IDs array
+    /// </summary>
+    public AdhesionConnections.ParticleIDData[] GetParticleIDs()
+    {
+        return particleIDs;
     }
 }

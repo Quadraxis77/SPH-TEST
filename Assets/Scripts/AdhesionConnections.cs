@@ -213,6 +213,42 @@ public class AdhesionConnections
     }
 
     /// <summary>
+    /// Determines if a child should keep its parent's adhesion connections based on child type
+    /// </summary>
+    private static bool ShouldKeepAdhesion(char childType, int childIndex)
+    {
+        // Get the current genome and check the appropriate flag
+        var controller = GameObject.FindObjectOfType<ParticleSystemController>();
+        if (controller != null && controller.genome != null)
+        {
+            // Get the specific mode for this particle
+            GenomeMode genomeMode = controller.GetGenomeModeForParticle(childIndex);
+            if (genomeMode != null)
+            {
+                Debug.Log($"Checking keep adhesion for child type {childType}, mode: {genomeMode.modeName}");
+                if (childType == 'A')
+                {
+                    Debug.Log($"Child A keepAdhesion = {genomeMode.childA_KeepAdhesion}");
+                    return genomeMode.childA_KeepAdhesion;
+                }
+                else if (childType == 'B')
+                {
+                    Debug.Log($"Child B keepAdhesion = {genomeMode.childB_KeepAdhesion}");
+                    return genomeMode.childB_KeepAdhesion;
+                }
+            }
+            else
+            {
+                Debug.LogWarning($"No genome mode found for particle {childIndex}");
+            }
+        }
+        
+        // Default to true to ensure connections are maintained if we can't determine
+        Debug.LogWarning("Could not determine whether to keep adhesion, defaulting to TRUE");
+        return true;
+    }
+
+    /// <summary>
     /// Creates adhesion connections between particles based on their positions, rotations, and IDs
     /// </summary>
     public static (Dictionary<int, Cell>, HashSet<Bond>) CreateAdhesionsFromParticles(
@@ -220,7 +256,7 @@ public class AdhesionConnections
         Quaternion[] particleRotations,
         int activeParticleCount,
         ParticleIDData[] particleIDs,
-        float maxConnectionDistance)
+        float maxConnectionDistance) // Parameter kept for backward compatibility
     {
         if (particlePositions == null || particlePositions.Length == 0 || activeParticleCount <= 0)
         {
@@ -230,6 +266,7 @@ public class AdhesionConnections
 
         var cells = new Dictionary<int, Cell>();
         var bonds = new HashSet<Bond>();
+        var existingBonds = new Dictionary<int, List<int>>(); // Track cell connections by parent
 
         // 1. Create cells from all valid particles
         for (int i = 0; i < activeParticleCount; i++)
@@ -264,7 +301,7 @@ public class AdhesionConnections
         
         Debug.Log($"Created {cells.Count} cells from particle positions.");
         
-        // 2. Create only strictly valid connections
+        // 2. Create valid connections based on sibling relationships
         if (particleIDs != null)
         {
             // Create a map of parent IDs to children for sibling connections
@@ -302,36 +339,111 @@ public class AdhesionConnections
                 }
             }
             
-            // RULE 2: Create bonds between same-type cells (A-A or B-B)
-            // Use a spatial grid for efficient neighbor finding
-            var cellGrid = CreateSpatialGrid(cells, maxConnectionDistance);
-            
+            // Build the map of existing bonds for each parent
             foreach (int cellID in cells.Keys)
             {
-                char cellType = particleIDs[cellID].childType;
-                Vector3 cellPos = cells[cellID].Position;
+                int parentID = particleIDs[cellID].parentID;
                 
-                // Find potential neighbors using the spatial grid
-                var potentialNeighbors = GetPotentialNeighbors(cellPos, cellGrid, maxConnectionDistance);
+                // Skip the root cell (parentID 0)
+                if (parentID == 0) continue;
                 
-                foreach (int neighborID in potentialNeighbors)
+                if (!existingBonds.ContainsKey(parentID))
                 {
-                    // Skip self and already processed pairs
-                    if (neighborID <= cellID) continue;
+                    existingBonds[parentID] = new List<int>();
+                }
+            }
+            
+            // Now look in the _currentBondsByUniqueId dictionary to find existing connections
+            if (_currentBondsByUniqueId != null && _currentBondsByUniqueId.Count > 0)
+            {
+                Debug.Log($"Using {_currentBondsByUniqueId.Count} tracked bond connections");
+                
+                // Create a map from uniqueIDs to current particle indices
+                Dictionary<int, int> uniqueIdToIndex = new Dictionary<int, int>();
+                for (int i = 0; i < activeParticleCount; i++)
+                {
+                    uniqueIdToIndex[particleIDs[i].uniqueID] = i;
+                }
+                
+                // For each entry in the _currentBondsByUniqueId, map it to existing bonds
+                foreach (var entry in _currentBondsByUniqueId)
+                {
+                    int parentUniqueId = entry.Key;
                     
-                    // Skip if these are already siblings
-                    if (particleIDs[cellID].parentID == particleIDs[neighborID].parentID)
-                        continue;
-                    
-                    // Only connect same types (A-A or B-B)
-                    if (particleIDs[neighborID].childType == cellType)
+                    // Check if we have a mapping from this uniqueId to an active cell
+                    if (uniqueIdToIndex.TryGetValue(parentUniqueId, out int parentIndex))
                     {
-                        // Check distance
-                        float distance = Vector3.Distance(cellPos, cells[neighborID].Position);
-                        if (distance <= maxConnectionDistance)
+                        int parentParentId = particleIDs[parentIndex].parentID;
+                        
+                        // Make sure the parent's entry exists in the dictionary
+                        if (!existingBonds.ContainsKey(parentParentId))
                         {
-                            bonds.Add(new Bond(cellID, neighborID, Bond.BondType.SameType));
-                            Debug.Log($"Created SAME_TYPE bond between {particleIDs[cellID].GetFormattedID()} and {particleIDs[neighborID].GetFormattedID()}");
+                            existingBonds[parentParentId] = new List<int>();
+                        }
+                        
+                        // Add connections
+                        foreach (int connectedUniqueId in entry.Value)
+                        {
+                            if (uniqueIdToIndex.TryGetValue(connectedUniqueId, out int connectedIndex))
+                            {
+                                // Only add if not already present
+                                if (!existingBonds[parentParentId].Contains(connectedIndex))
+                                {
+                                    existingBonds[parentParentId].Add(connectedIndex);
+                                    Debug.Log($"Added connection from parent {parentParentId} to {connectedIndex}");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            else
+            {
+                Debug.Log("No existing bond connections found in tracking system");
+            }
+            
+            // RULE 2: Inherit parent connections based on keepAdhesion flag
+            // We need to go through children within each parent and check their keepAdhesion flag
+            foreach (var parentID in existingBonds.Keys)
+            {
+                if (parentToChildren.TryGetValue(parentID, out var children))
+                {
+                    foreach (int childID in children)
+                    {
+                        // Determine if this child should keep parent's adhesions
+                        bool keepAdhesion = ShouldKeepAdhesion(particleIDs[childID].childType, childID);
+                        Debug.Log($"Child {particleIDs[childID].GetFormattedID()} keep adhesion: {keepAdhesion}");
+                        
+                        if (keepAdhesion)
+                        {
+                            // Inherit connections from parent
+                            foreach (int neighborID in existingBonds[parentID])
+                            {
+                                // Skip if it's already a sibling
+                                if (parentToChildren.ContainsKey(parentID) && 
+                                    parentToChildren[parentID].Contains(neighborID))
+                                    continue;
+                                    
+                                // Skip self-connections
+                                if (neighborID == childID)
+                                    continue;
+                                    
+                                // Skip if we already have this bond
+                                Bond newBond = new Bond(childID, neighborID, Bond.BondType.SameType);
+                                if (bonds.Contains(newBond))
+                                    continue;
+                                    
+                                // Check if child and neighbor are on the same side of the split
+                                if (ShouldInheritBond(parentID, childID, cells[childID].Position, cells[neighborID].Position))
+                                {
+                                    bonds.Add(newBond);
+                                    Debug.Log($"Inherited parent bond: {particleIDs[childID].GetFormattedID()} to {particleIDs[neighborID].GetFormattedID()}");
+                                }
+                            }
+                        }
+                        else
+                        {
+                            Debug.Log($"Child {particleIDs[childID].GetFormattedID()} NOT keeping adhesion connections from parent");
                         }
                     }
                 }
@@ -479,6 +591,64 @@ public class AdhesionConnections
         return !float.IsNaN(position.x) && !float.IsNaN(position.y) && !float.IsNaN(position.z) &&
                !float.IsInfinity(position.x) && !float.IsInfinity(position.y) && !float.IsInfinity(position.z);
     }
+
+    #endregion
+
+    #region Bond Tracking
+
+    /// <summary>
+    /// Function to expose the current bonds to the controller
+    /// </summary>
+    public static void SetCurrentBonds(ParticleSystemController controller, HashSet<Bond> currentBonds)
+    {
+        // Create a static dictionary to track bonds between cells by their uniqueIDs rather than indices
+        if (_currentBondsByUniqueId == null)
+        {
+            _currentBondsByUniqueId = new Dictionary<int, List<int>>();
+        }
+        
+        // Clear the dictionary for this update
+        _currentBondsByUniqueId.Clear();
+        
+        if (currentBonds == null || currentBonds.Count == 0)
+        {
+            return;
+        }
+        
+        // Get the particle IDs from the controller
+        var particleIDs = controller.GetParticleIDs();
+        if (particleIDs == null)
+        {
+            Debug.LogWarning("Cannot set current bonds: no particle IDs available");
+            return;
+        }
+        
+        // Fill the dictionary with all current bonds using uniqueIDs
+        foreach (var bond in currentBonds)
+        {
+            int idA = particleIDs[bond.A].uniqueID;
+            int idB = particleIDs[bond.B].uniqueID;
+            
+            // Add A's connection to B
+            if (!_currentBondsByUniqueId.ContainsKey(idA))
+            {
+                _currentBondsByUniqueId[idA] = new List<int>();
+            }
+            _currentBondsByUniqueId[idA].Add(idB);
+            
+            // Add B's connection to A
+            if (!_currentBondsByUniqueId.ContainsKey(idB))
+            {
+                _currentBondsByUniqueId[idB] = new List<int>();
+            }
+            _currentBondsByUniqueId[idB].Add(idA);
+        }
+        
+        Debug.Log($"Set {_currentBondsByUniqueId.Count} cells with connections in the bond tracking system");
+    }
+    
+    // Static dictionary to track bonds using uniqueIDs instead of indices
+    private static Dictionary<int, List<int>> _currentBondsByUniqueId;
 
     #endregion
 }
