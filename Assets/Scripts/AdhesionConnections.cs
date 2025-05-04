@@ -215,10 +215,8 @@ public class AdhesionConnections
     /// <summary>
     /// Determines if a child should keep its parent's adhesion connections based on child type
     /// </summary>
-    private static bool ShouldKeepAdhesion(char childType, int childIndex)
+    private static bool ShouldKeepAdhesion(char childType, int childIndex, ParticleSystemController controller)
     {
-        // Get the current genome and check the appropriate flag
-        var controller = GameObject.FindObjectOfType<ParticleSystemController>();
         if (controller != null && controller.genome != null)
         {
             // Get the specific mode for this particle
@@ -256,6 +254,7 @@ public class AdhesionConnections
         Quaternion[] particleRotations,
         int activeParticleCount,
         ParticleIDData[] particleIDs,
+        ParticleSystemController controller,
         float maxConnectionDistance) // Parameter kept for backward compatibility
     {
         if (particlePositions == null || particlePositions.Length == 0 || activeParticleCount <= 0)
@@ -411,7 +410,7 @@ public class AdhesionConnections
                     foreach (int childID in children)
                     {
                         // Determine if this child should keep parent's adhesions
-                        bool keepAdhesion = ShouldKeepAdhesion(particleIDs[childID].childType, childID);
+                        bool keepAdhesion = ShouldKeepAdhesion(particleIDs[childID].childType, childID, controller);
                         Debug.Log($"Child {particleIDs[childID].GetFormattedID()} keep adhesion: {keepAdhesion}");
                         
                         if (keepAdhesion)
@@ -649,6 +648,19 @@ public class AdhesionConnections
     
     // Static dictionary to track bonds using uniqueIDs instead of indices
     private static Dictionary<int, List<int>> _currentBondsByUniqueId;
+
+    /// <summary>
+    /// Clears all static data to ensure clean state between simulation runs
+    /// </summary>
+    public static void ClearStaticData()
+    {
+        splitInfoMap.Clear();
+        if (_currentBondsByUniqueId != null)
+        {
+            _currentBondsByUniqueId.Clear();
+        }
+        Debug.Log("Cleared all static adhesion data");
+    }
 
     #endregion
 }

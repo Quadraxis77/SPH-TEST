@@ -154,6 +154,9 @@ public class ParticleSystemController : MonoBehaviour
     {
         Application.targetFrameRate = 144;
         
+        // Clear any static data from previous runs
+        AdhesionConnections.ClearStaticData();
+        
         // Subscribe to genome changes
         if (genome != null)
         {
@@ -228,7 +231,8 @@ public class ParticleSystemController : MonoBehaviour
             cpuParticleRotations,
             activeParticleCount,
             particleIDs,
-            0 // Distance threshold no longer used
+            this,
+            0
         );
         
         Debug.Log($"Created {cells.Count} cells and {bonds.Count} bonds.");
@@ -435,6 +439,9 @@ public class ParticleSystemController : MonoBehaviour
 
     void OnGenomeChanged()
     {
+        // Clear static data and reinitialize particles when genome changes
+        AdhesionConnections.ClearStaticData();
+        
         // Reinitialize particles when genome changes
         if (particleBuffer != null)
         {
