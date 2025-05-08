@@ -114,8 +114,8 @@ public class AdhesionConnections
 
         public enum BondType
         {
-            Sibling,  // Bond between cells from the same parent
-            SameType  // Bond between same-type cells (A-A or B-B)
+            Sibling,  // Bond between cells from the same parent (newly created)
+            Kept      // Bond that was inherited from a parent during cell division
         }
 
         public Bond(int a, int b, BondType type)
@@ -131,12 +131,14 @@ public class AdhesionConnections
             if (!(obj is Bond))
                 return false;
             Bond other = (Bond)obj;
-            return A == other.A && B == other.B;
+            // Compare both indices AND bond type for true equality
+            return A == other.A && B == other.B && Type == other.Type;
         }
 
         public override int GetHashCode()
         {
-            return A.GetHashCode() ^ (B.GetHashCode() << 2);
+            // Include bond type in the hash code calculation
+            return A.GetHashCode() ^ (B.GetHashCode() << 2) ^ ((int)Type << 4);
         }
     }
 
@@ -182,34 +184,120 @@ public class AdhesionConnections
     /// </summary>
     public static void RegisterCellDivision(int parentID, Vector3 parentPosition, Vector3 childAPosition, Vector3 childBPosition)
     {
-        Vector3 splitDirection = (childBPosition - childAPosition).normalized;
-        splitInfoMap[parentID] = new SplitInfo(parentID, splitDirection, parentPosition);
+        // Ensure consistent calculations by rounding positions to reduce floating point variations
+        Vector3 normalizedChildAPos = new Vector3(
+            (float)Math.Round(childAPosition.x, 4),
+            (float)Math.Round(childAPosition.y, 4),
+            (float)Math.Round(childAPosition.z, 4)
+        );
+        
+        Vector3 normalizedChildBPos = new Vector3(
+            (float)Math.Round(childBPosition.x, 4),
+            (float)Math.Round(childBPosition.y, 4),
+            (float)Math.Round(childBPosition.z, 4)
+        );
+        
+        Vector3 normalizedParentPos = new Vector3(
+            (float)Math.Round(parentPosition.x, 4),
+            (float)Math.Round(parentPosition.y, 4),
+            (float)Math.Round(parentPosition.z, 4)
+        );
+        
+        // Calculate the split direction using normalized positions
+        Vector3 splitDirection = (normalizedChildBPos - normalizedChildAPos).normalized;
+        
+        // Round the split direction components to ensure consistency
+        splitDirection = new Vector3(
+            (float)Math.Round(splitDirection.x, 4),
+            (float)Math.Round(splitDirection.y, 4),
+            (float)Math.Round(splitDirection.z, 4)
+        );
+        
+        // Normalize again after rounding to ensure unit length
+        splitDirection = splitDirection.normalized;
+        
+        splitInfoMap[parentID] = new SplitInfo(parentID, splitDirection, normalizedParentPos);
     }
 
     /// <summary>
-    /// Determines which child should inherit a bond based on half-side check
+    /// Determines which child should inherit a bond based on a 30-degree trench aligned with the split plane
     /// </summary>
-    private static bool ShouldInheritBond(int parentID, int childID, Vector3 childPos, Vector3 neighborPos)
+    private static bool ShouldInheritBond(int parentID, int childID, Vector3 childPos, Vector3 neighborPos, bool sharedBond)
     {
         // If we don't have split info for this parent, both children inherit bonds
         if (!splitInfoMap.TryGetValue(parentID, out SplitInfo splitInfo))
         {
+            Debug.Log($"No split info for parent {parentID}, defaulting to inherit bond");
             return true;
         }
 
         // Calculate vector from split position to neighbor
         Vector3 toNeighbor = neighborPos - splitInfo.splitPosition;
         
-        // Calculate vector from split position to child
-        Vector3 toChild = childPos - splitInfo.splitPosition;
+        // Create normalized bond direction vector
+        Vector3 bondDir = toNeighbor.normalized;
         
-        // Check if they're on the same side of the splitting plane
-        // Dot product will be positive if they're on the same side
-        float neighborSide = Vector3.Dot(toNeighbor, splitInfo.splitDirection);
-        float childSide = Vector3.Dot(toChild, splitInfo.splitDirection);
+        // Define the trench half angle (in degrees) - ensure consistency
+        const float trenchHalfAngle = 9f; // Total trench angle will be 30 degrees
         
-        // Child inherits bond if it's on the same side as the neighbor
-        return (neighborSide * childSide > 0);
+        // Calculate the angle between the bond direction and the split plane
+        // This is done by first finding the dot product with the split axis
+        float dotWithSplitAxis = Vector3.Dot(bondDir, splitInfo.splitDirection);
+        
+        // The angle between the vector and the plane is the complement of the angle with the axis
+        // Use exactly the same calculation everywhere for consistency
+        float angleWithSplitPlane = 90f - Mathf.Acos(Mathf.Abs(dotWithSplitAxis)) * Mathf.Rad2Deg;
+        
+        // Round the angle to a small number of decimal places to avoid floating point inconsistencies
+        angleWithSplitPlane = (float)Math.Round(angleWithSplitPlane, 4);
+        
+        // If this is a shared bond (both children have keepAdhesion=true) AND
+        // the bond direction is within the trench zone (within trenchHalfAngle of the split plane)
+        // Then both Child A and Child B inherit the bond
+        if (sharedBond && angleWithSplitPlane <= trenchHalfAngle)
+        {
+            // Log that this is a shared bond in the trench
+            Debug.Log($"ZONE: SHARED - Bond in trench zone (angle: {angleWithSplitPlane:F4}°), shared by both children");
+            return true; // Both children inherit this bond
+        }
+        else
+        {
+            // Calculate vector from split position to child
+            Vector3 toChild = childPos - splitInfo.splitPosition;
+            
+            // For bonds outside the trench, assign to whichever child is on the same side 
+            // Check if they're on the same side of the splitting plane
+            float neighborSide = Vector3.Dot(toNeighbor, splitInfo.splitDirection);
+            float childSide = Vector3.Dot(toChild, splitInfo.splitDirection);
+            
+            // Apply a small epsilon to avoid floating point comparison issues
+            const float epsilon = 0.0001f;
+            
+            // Child inherits bond if it's on the same side as the neighbor
+            // Round both values to minimize floating point differences
+            neighborSide = (float)Math.Round(neighborSide, 4);
+            childSide = (float)Math.Round(childSide, 4);
+            
+            // More robust check for same side (both positive or both negative)
+            bool sameSide = (childSide > epsilon && neighborSide > epsilon) || 
+                           (childSide < -epsilon && neighborSide < -epsilon);
+            
+            // Determine which side this bond is on (A side or B side)
+            string zoneSide;
+            if (childSide > 0)
+                zoneSide = "B SIDE"; // Positive dot product means B side (Child B direction)
+            else
+                zoneSide = "A SIDE"; // Negative dot product means A side (opposite of Child B direction)
+            
+            if (sameSide) {
+                Debug.Log($"ZONE: {zoneSide} - Bond outside trench (angle: {angleWithSplitPlane:F4}°) - " +
+                          $"Bond and child on same side (child: {childSide:F4}, neighbor: {neighborSide:F4}) - INHERITED");
+            } else {
+                Debug.Log($"ZONE: {zoneSide} - Bond outside trench (angle: {angleWithSplitPlane:F4}°) - " +
+                          $"Bond and child on OPPOSITE sides (child: {childSide:F4}, neighbor: {neighborSide:F4}) - NOT INHERITED");
+            }
+            return sameSide;
+        }
     }
 
     /// <summary>
@@ -267,7 +355,7 @@ public class AdhesionConnections
         var bonds = new HashSet<Bond>();
         var existingBonds = new Dictionary<int, List<int>>(); // Track cell connections by parent
 
-        // 1. Create cells from all valid particles
+        // 1. Create cells from all valid particles - process in fixed order
         for (int i = 0; i < activeParticleCount; i++)
         {
             if (i >= particlePositions.Length) break;
@@ -307,7 +395,11 @@ public class AdhesionConnections
             var parentToChildren = new Dictionary<int, List<int>>();
             
             // Populate the parent-to-children map
-            foreach (int cellID in cells.Keys)
+            // First sort the cell IDs for consistent order of processing
+            List<int> sortedCellIDs = new List<int>(cells.Keys);
+            sortedCellIDs.Sort();
+            
+            foreach (int cellID in sortedCellIDs)
             {
                 int parentID = particleIDs[cellID].parentID;
                 if (!parentToChildren.ContainsKey(parentID))
@@ -318,10 +410,18 @@ public class AdhesionConnections
             }
             
             // RULE 1: Create bonds between siblings (same parent)
-            foreach (var children in parentToChildren.Values)
+            // Sort parent IDs for consistent order of processing
+            List<int> sortedParentIDs = new List<int>(parentToChildren.Keys);
+            sortedParentIDs.Sort();
+            
+            foreach (int parentID in sortedParentIDs)
             {
+                var children = parentToChildren[parentID];
                 if (children.Count > 1)
                 {
+                    // Sort children to ensure consistent processing order
+                    children.Sort();
+                    
                     // Only connect direct siblings (typically A-B pairs)
                     for (int i = 0; i < children.Count; i++)
                     {
@@ -339,7 +439,7 @@ public class AdhesionConnections
             }
             
             // Build the map of existing bonds for each parent
-            foreach (int cellID in cells.Keys)
+            foreach (int cellID in sortedCellIDs)
             {
                 int parentID = particleIDs[cellID].parentID;
                 
@@ -364,11 +464,13 @@ public class AdhesionConnections
                     uniqueIdToIndex[particleIDs[i].uniqueID] = i;
                 }
                 
+                // Process in consistent order by sorting the keys
+                List<int> sortedUniqueIDs = new List<int>(_currentBondsByUniqueId.Keys);
+                sortedUniqueIDs.Sort();
+                
                 // For each entry in the _currentBondsByUniqueId, map it to existing bonds
-                foreach (var entry in _currentBondsByUniqueId)
+                foreach (int parentUniqueId in sortedUniqueIDs)
                 {
-                    int parentUniqueId = entry.Key;
-                    
                     // Check if we have a mapping from this uniqueId to an active cell
                     if (uniqueIdToIndex.TryGetValue(parentUniqueId, out int parentIndex))
                     {
@@ -380,14 +482,33 @@ public class AdhesionConnections
                             existingBonds[parentParentId] = new List<int>();
                         }
                         
+                        // Sort the connected IDs for consistent processing
+                        List<int> sortedConnectedIDs = new List<int>(_currentBondsByUniqueId[parentUniqueId]);
+                        sortedConnectedIDs.Sort();
+                        
                         // Add connections
-                        foreach (int connectedUniqueId in entry.Value)
+                        foreach (int connectedUniqueId in sortedConnectedIDs)
                         {
                             if (uniqueIdToIndex.TryGetValue(connectedUniqueId, out int connectedIndex))
                             {
                                 // Only add if not already present
                                 if (!existingBonds[parentParentId].Contains(connectedIndex))
                                 {
+                                    // Check if this was a sibling bond - if so, we need to determine if it should be kept
+                                    // Sibling bonds from previous generations will be tracked in our bond type dictionary
+                                    int minId = Mathf.Min(parentUniqueId, connectedUniqueId);
+                                    int maxId = Mathf.Max(parentUniqueId, connectedUniqueId);
+                                    
+                                    // If it was a sibling bond in the previous generation, we need to check inheritance rules
+                                    if (_bondTypesByUniqueIdPair.TryGetValue((minId, maxId), out Bond.BondType bondType) && 
+                                        bondType == Bond.BondType.Sibling)
+                                    {
+                                        // For sibling bonds, we need to check inheritance rules during cell division
+                                        // This will be handled later in the inheritance logic
+                                        Debug.Log($"Found previous generation sibling bond between {parentUniqueId} and {connectedUniqueId} - will apply inheritance rules");
+                                    }
+                                    
+                                    // Whether it was a sibling bond or not, add it to existing bonds to check inheritance
                                     existingBonds[parentParentId].Add(connectedIndex);
                                     Debug.Log($"Added connection from parent {parentParentId} to {connectedIndex}");
                                 }
@@ -402,11 +523,18 @@ public class AdhesionConnections
             }
             
             // RULE 2: Inherit parent connections based on keepAdhesion flag
+            // Sort parent IDs for processing in consistent order
+            List<int> parentsToProcess = new List<int>(existingBonds.Keys);
+            parentsToProcess.Sort();
+            
             // We need to go through children within each parent and check their keepAdhesion flag
-            foreach (var parentID in existingBonds.Keys)
+            foreach (int parentID in parentsToProcess)
             {
                 if (parentToChildren.TryGetValue(parentID, out var children))
                 {
+                    // Sort children for consistent order of processing
+                    children.Sort();
+                    
                     foreach (int childID in children)
                     {
                         // Determine if this child should keep parent's adhesions
@@ -415,8 +543,12 @@ public class AdhesionConnections
                         
                         if (keepAdhesion)
                         {
+                            // Sort neighbors for consistent order of processing
+                            List<int> sortedNeighbors = new List<int>(existingBonds[parentID]);
+                            sortedNeighbors.Sort();
+                            
                             // Inherit connections from parent
-                            foreach (int neighborID in existingBonds[parentID])
+                            foreach (int neighborID in sortedNeighbors)
                             {
                                 // Skip if it's already a sibling
                                 if (parentToChildren.ContainsKey(parentID) && 
@@ -428,15 +560,76 @@ public class AdhesionConnections
                                     continue;
                                     
                                 // Skip if we already have this bond
-                                Bond newBond = new Bond(childID, neighborID, Bond.BondType.SameType);
-                                if (bonds.Contains(newBond))
+                                Bond newBond = new Bond(childID, neighborID, Bond.BondType.Kept);
+                                
+                                // Skip if we already have this bond (ensure we check both for Sibling and Kept types)
+                                // Create test bonds for both possible types to check
+                                Bond keptBond = new Bond(childID, neighborID, Bond.BondType.Kept);
+                                Bond siblingBond = new Bond(childID, neighborID, Bond.BondType.Sibling);
+                                
+                                if (bonds.Contains(keptBond) || bonds.Contains(siblingBond))
+                                {
+                                    Debug.Log($"Already has bond between {childID} and {neighborID}, skipping");
                                     continue;
-                                    
+                                }
+                                
                                 // Check if child and neighbor are on the same side of the split
-                                if (ShouldInheritBond(parentID, childID, cells[childID].Position, cells[neighborID].Position))
+                                // First determine if this child specifically has keepAdhesion enabled
+                                bool thisChildKeepsAdhesion = ShouldKeepAdhesion(
+                                    particleIDs[childID].childType, 
+                                    childID, 
+                                    controller
+                                );
+                                
+                                bool isSharedBond = false;
+                                
+                                // Check if all children of this parent have keepAdhesion enabled
+                                if (parentToChildren.TryGetValue(parentID, out var siblingList) && siblingList.Count > 0)
+                                {
+                                    // Create a copy of the list before sorting to avoid modifying during enumeration
+                                    List<int> siblingListCopy = new List<int>(siblingList);
+                                    siblingListCopy.Sort(); // Sort for consistent processing
+                                    
+                                    bool allSiblingsKeepAdhesion = true;
+                                    
+                                    foreach (int siblingID in siblingListCopy)
+                                    {
+                                        bool siblingKeepsAdhesion = ShouldKeepAdhesion(
+                                            particleIDs[siblingID].childType, 
+                                            siblingID, 
+                                            controller
+                                        );
+                                        
+                                        if (!siblingKeepsAdhesion)
+                                        {
+                                            allSiblingsKeepAdhesion = false;
+                                            break;
+                                        }
+                                    }
+                                    
+                                    isSharedBond = allSiblingsKeepAdhesion;
+                                }
+                                
+                                // Skip if this child doesn't keep adhesion
+                                if (!thisChildKeepsAdhesion)
+                                {
+                                    Debug.Log($"Child {particleIDs[childID].GetFormattedID()} skipping bond to {particleIDs[neighborID].GetFormattedID()} - this child doesn't keep adhesion");
+                                    continue;
+                                }
+                                
+                                // Check if this bond should be inherited based on position relative to split plane
+                                bool shouldInherit = ShouldInheritBond(parentID, childID, cells[childID].Position, cells[neighborID].Position, isSharedBond);
+                                
+                                // If ShouldInheritBond returns false, it means the bond belongs to the other side
+                                // Only add the bond if it should be inherited by this child
+                                if (shouldInherit)
                                 {
                                     bonds.Add(newBond);
                                     Debug.Log($"Inherited parent bond: {particleIDs[childID].GetFormattedID()} to {particleIDs[neighborID].GetFormattedID()}");
+                                }
+                                else
+                                {
+                                    Debug.Log($"Bond to {particleIDs[neighborID].GetFormattedID()} belongs to the other side of the split");
                                 }
                             }
                         }
@@ -595,6 +788,9 @@ public class AdhesionConnections
 
     #region Bond Tracking
 
+    // Dictionary to track bond types by unique ID pairs
+    private static Dictionary<(int, int), Bond.BondType> _bondTypesByUniqueIdPair = new Dictionary<(int, int), Bond.BondType>();
+
     /// <summary>
     /// Function to expose the current bonds to the controller
     /// </summary>
@@ -606,8 +802,9 @@ public class AdhesionConnections
             _currentBondsByUniqueId = new Dictionary<int, List<int>>();
         }
         
-        // Clear the dictionary for this update
+        // Clear the dictionaries for this update
         _currentBondsByUniqueId.Clear();
+        _bondTypesByUniqueIdPair.Clear();
         
         if (currentBonds == null || currentBonds.Count == 0)
         {
@@ -627,6 +824,11 @@ public class AdhesionConnections
         {
             int idA = particleIDs[bond.A].uniqueID;
             int idB = particleIDs[bond.B].uniqueID;
+            
+            // Store bond type by the unique ID pair
+            int minId = Mathf.Min(idA, idB);
+            int maxId = Mathf.Max(idA, idB);
+            _bondTypesByUniqueIdPair[(minId, maxId)] = bond.Type;
             
             // Add A's connection to B
             if (!_currentBondsByUniqueId.ContainsKey(idA))
@@ -658,6 +860,10 @@ public class AdhesionConnections
         if (_currentBondsByUniqueId != null)
         {
             _currentBondsByUniqueId.Clear();
+        }
+        if (_bondTypesByUniqueIdPair != null)
+        {
+            _bondTypesByUniqueIdPair.Clear();
         }
         Debug.Log("Cleared all static adhesion data");
     }

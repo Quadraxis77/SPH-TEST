@@ -22,11 +22,11 @@ MonoBehaviour:
     parentSplitYaw: 0
     parentSplitPitch: 0
     childAModeIndex: 0
-    childA_OrientationYaw: 90
+    childA_OrientationYaw: 0
     childA_OrientationPitch: 0
     childA_KeepAdhesion: 1
     childBModeIndex: 0
-    childB_OrientationYaw: 90
+    childB_OrientationYaw: 0
     childB_OrientationPitch: 0
     childB_KeepAdhesion: 1
     adhesionRestLength: 1
