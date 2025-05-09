@@ -290,6 +290,14 @@ public class AdhesionConnections
             zone = "A SIDE"; // Negative dot product means A side (opposite of Child B direction)
         else
             zone = "TRENCH ZONE"; // Very close to the split plane (should have been caught above, but just in case)
+        
+        // Log when a bond fails to be inherited due to side assignment
+        if (!sameSide) {
+            Debug.Log($"Bond inheritance failed for parentID={parentID}, childID={childID}: " +
+                      $"Bond is in {zone} zone, but child is on opposite side. " +
+                      $"neighborSide={neighborSide}, childSide={childSide}, " +
+                      $"angleWithSplitPlane={angleWithSplitPlane}°");
+        }
             
         // For non-trench zone bonds, maintain strict side assignment
         return sameSide;
@@ -327,6 +335,41 @@ public class AdhesionConnections
     }
 
     /// <summary>
+    /// Checks if the two cells can form a valid adhesion connection (one-sided initiation is allowed if both have keepAdhesion)
+    /// </summary>
+    private static bool CanFormValidAdhesion(
+        int childID, 
+        int neighborID, 
+        ParticleIDData[] particleIDs, 
+        ParticleSystemController controller)
+    {
+        // Get keepAdhesion flags for both the child and the neighbor
+        bool childKeepsAdhesion = ShouldKeepAdhesion(
+            particleIDs[childID].childType, 
+            childID, 
+            controller
+        );
+        
+        bool neighborKeepsAdhesion = ShouldKeepAdhesion(
+            particleIDs[neighborID].childType, 
+            neighborID, 
+            controller
+        );
+        
+        // Add detailed logging for adhesion failures
+        if (!childKeepsAdhesion || !neighborKeepsAdhesion) {
+            string childID_str = particleIDs[childID].GetFormattedID();
+            string neighborID_str = particleIDs[neighborID].GetFormattedID();
+            Debug.Log($"Bond formation failed between {childID_str} and {neighborID_str}: " +
+                     $"childKeepsAdhesion={childKeepsAdhesion}, neighborKeepsAdhesion={neighborKeepsAdhesion}");
+        }
+        
+        // One-sided initiation is allowed as long as both sides have keepAdhesion=true
+        // This means either side can initiate, but both must be able to maintain adhesion
+        return childKeepsAdhesion && neighborKeepsAdhesion;
+    }
+
+    /// <summary>
     /// Creates adhesion connections between particles based on their positions, rotations, and IDs
     /// </summary>
     public static (Dictionary<int, Cell>, HashSet<Bond>) CreateAdhesionsFromParticles(
@@ -343,9 +386,25 @@ public class AdhesionConnections
             return (new Dictionary<int, Cell>(), new HashSet<Bond>());
         }
 
+        // Log the active cells and their IDs for debugging
+        if (particleIDs != null)
+        {
+            for (int i = 0; i < activeParticleCount; i++)
+            {
+                if (i < particleIDs.Length)
+                {
+                    Debug.Log($"Active cell: {particleIDs[i].GetFormattedID()}, " +
+                              $"keepAdhesion={ShouldKeepAdhesion(particleIDs[i].childType, i, controller)}");
+                }
+            }
+        }
+
         var cells = new Dictionary<int, Cell>();
         var bonds = new HashSet<Bond>();
         var existingBonds = new Dictionary<int, List<int>>(); // Track cell connections by parent
+        
+        // Create a map of parent IDs to children for sibling connections - declared in the outer scope
+        var parentToChildren = new Dictionary<int, List<int>>();
 
         // 1. Create cells from all valid particles - process in fixed order
         for (int i = 0; i < activeParticleCount; i++)
@@ -373,6 +432,14 @@ public class AdhesionConnections
                     particleIDs[i].uniqueID,
                     particleIDs[i].childType
                 );
+                
+                // Populate the parent-to-children map as we create cells
+                int parentID = particleIDs[i].parentID;
+                if (!parentToChildren.ContainsKey(parentID))
+                {
+                    parentToChildren[parentID] = new List<int>();
+                }
+                parentToChildren[parentID].Add(i);
             }
             
             cells[i] = cell;
@@ -381,24 +448,6 @@ public class AdhesionConnections
         // 2. Create valid connections based on sibling relationships
         if (particleIDs != null)
         {
-            // Create a map of parent IDs to children for sibling connections
-            var parentToChildren = new Dictionary<int, List<int>>();
-            
-            // Populate the parent-to-children map
-            // First sort the cell IDs for consistent order of processing
-            List<int> sortedCellIDs = new List<int>(cells.Keys);
-            sortedCellIDs.Sort();
-            
-            foreach (int cellID in sortedCellIDs)
-            {
-                int parentID = particleIDs[cellID].parentID;
-                if (!parentToChildren.ContainsKey(parentID))
-                {
-                    parentToChildren[parentID] = new List<int>();
-                }
-                parentToChildren[parentID].Add(cellID);
-            }
-            
             // RULE 1: Create bonds between siblings (same parent)
             // Sort parent IDs for consistent order of processing
             List<int> sortedParentIDs = new List<int>(parentToChildren.Keys);
@@ -428,7 +477,7 @@ public class AdhesionConnections
             }
             
             // Build the map of existing bonds for each parent
-            foreach (int cellID in sortedCellIDs)
+            foreach (int cellID in cells.Keys)
             {
                 int parentID = particleIDs[cellID].parentID;
                 
@@ -532,6 +581,9 @@ public class AdhesionConnections
                                 
                                 if (bonds.Contains(keptBond) || bonds.Contains(siblingBond))
                                 {
+                                    string childID_str = particleIDs[childID].GetFormattedID();
+                                    string neighborID_str = particleIDs[neighborID].GetFormattedID();
+                                    Debug.Log($"Bond already exists between {childID_str} and {neighborID_str}, skipping creation");
                                     continue;
                                 }
                                 
@@ -545,22 +597,20 @@ public class AdhesionConnections
                                 // Skip if this child doesn't keep adhesion
                                 if (!thisChildKeepsAdhesion)
                                 {
+                                    string childID_str = particleIDs[childID].GetFormattedID();
+                                    Debug.Log($"Bond inheritance skipped: Child {childID_str} has keepAdhesion=false");
                                     continue;
                                 }
                                 
                                 // For the handshake, check if the neighbor also wants to keep connections
                                 // Find the parent of the neighbor
                                 int neighborParentID = particleIDs[neighborID].parentID;
-                                bool neighborKeepsAdhesion = ShouldKeepAdhesion(
-                                    particleIDs[neighborID].childType, 
-                                    neighborID, 
-                                    controller
-                                );
                                 
-                                // Only proceed if both sides want to keep the connection
-                                if (!neighborKeepsAdhesion)
+                                // Use the new CanFormValidAdhesion method to check if a valid connection can be formed
+                                // This allows for one-sided initiation as long as both sides have keepAdhesion=true
+                                if (!CanFormValidAdhesion(childID, neighborID, particleIDs, controller))
                                 {
-                                    continue; // Skip if the other side doesn't want to keep the connection
+                                    continue; // Skip if a valid adhesion connection can't be formed
                                 }
                                 
                                 bool isSharedBond = false;
@@ -599,12 +649,191 @@ public class AdhesionConnections
                                 // Only add the bond if it should be inherited by this child
                                 if (shouldInherit)
                                 {
+                                    string childID_str = particleIDs[childID].GetFormattedID();
+                                    string neighborID_str = particleIDs[neighborID].GetFormattedID();
+                                    Debug.Log($"Bond successfully created between {childID_str} and {neighborID_str} " +
+                                              $"(bond type: {Bond.BondType.Kept}, parent: {parentID})");
                                     bonds.Add(new Bond(childID, neighborID, Bond.BondType.Kept));
                                 }
                             }
                         }
                     }
                 }
+            }
+        }
+        
+        // Add logging for all potential cell pairings after cells have been created
+        Debug.Log("Logging all potential cell pairings for connection analysis:");
+        List<int> allCellIDs = new List<int>(cells.Keys);
+        allCellIDs.Sort(); // Sort for consistent processing
+        
+        // Track pairs of cells that both have keepAdhesion=true but don't have a bond
+        List<(int, int, string, string)> potentialNewConnections = new List<(int, int, string, string)>();
+        
+        for (int i = 0; i < allCellIDs.Count; i++)
+        {
+            for (int j = i + 1; j < allCellIDs.Count; j++)
+            {
+                int cellA = allCellIDs[i];
+                int cellB = allCellIDs[j];
+                
+                // Skip invalid indices
+                if (cellA >= particleIDs.Length || cellB >= particleIDs.Length)
+                    continue;
+                    
+                string cellA_ID = particleIDs[cellA].GetFormattedID();
+                string cellB_ID = particleIDs[cellB].GetFormattedID();
+                
+                bool cellAKeepsAdhesion = ShouldKeepAdhesion(
+                    particleIDs[cellA].childType, 
+                    cellA, 
+                    controller
+                );
+                
+                bool cellBKeepsAdhesion = ShouldKeepAdhesion(
+                    particleIDs[cellB].childType, 
+                    cellB, 
+                    controller
+                );
+                
+                Debug.Log($"Potential connection: {cellA_ID} <-> {cellB_ID}, " +
+                          $"keepAdhesion: [{cellAKeepsAdhesion}] <-> [{cellBKeepsAdhesion}]");
+                
+                // If both cells have keepAdhesion=true but no bond exists between them,
+                // add them to our list of potential new connections
+                if (cellAKeepsAdhesion && cellBKeepsAdhesion) 
+                {
+                    // Check if they already have a bond
+                    Bond keptBond = new Bond(cellA, cellB, Bond.BondType.Kept);
+                    Bond siblingBond = new Bond(cellA, cellB, Bond.BondType.Sibling);
+                    
+                    if (!bonds.Contains(keptBond) && !bonds.Contains(siblingBond))
+                    {
+                        potentialNewConnections.Add((cellA, cellB, cellA_ID, cellB_ID));
+                    }
+                }
+                
+                // Special logging for specific cell IDs we're concerned about
+                if ((cellA_ID == "02.06.B" && cellB_ID == "01.04.B") || 
+                    (cellA_ID == "01.04.B" && cellB_ID == "02.06.B")) {
+                    
+                    // When we find this specific pair, do deep diagnosis
+                    Debug.Log($"SPECIFIC PAIR ANALYSIS: {cellA_ID} <-> {cellB_ID}");
+                    Debug.Log($"  Cell A ({cellA_ID}) keepAdhesion: {cellAKeepsAdhesion}");
+                    Debug.Log($"  Cell B ({cellB_ID}) keepAdhesion: {cellBKeepsAdhesion}");
+                    
+                    // Check if there's a parent-child relationship that would trigger bond inheritance
+                    Debug.Log($"  Cell A parentID: {particleIDs[cellA].parentID}");
+                    Debug.Log($"  Cell B parentID: {particleIDs[cellB].parentID}");
+                    
+                    // Check if they're in _currentBondsByUniqueId (which would mean a bond existed previously)
+                    bool isPreviousBond = false;
+                    if (_currentBondsByUniqueId != null) {
+                        // Check if either cell has the other in its connections list
+                        if (_currentBondsByUniqueId.TryGetValue(particleIDs[cellA].uniqueID, out var cellAConnections)) {
+                            isPreviousBond = cellAConnections.Contains(particleIDs[cellB].uniqueID);
+                        }
+                    }
+                    Debug.Log($"  Previously bonded: {isPreviousBond}");
+                    
+                    // Check if there's any existing bond between them
+                    Bond testBond1 = new Bond(cellA, cellB, Bond.BondType.Kept);
+                    Bond testBond2 = new Bond(cellA, cellB, Bond.BondType.Sibling);
+                    Debug.Log($"  Current bond exists: {bonds.Contains(testBond1) || bonds.Contains(testBond2)}");
+                    
+                    // Explain why bond formation isn't being attempted
+                    Debug.Log($"  Bond formation status: The bond isn't being created because parent-child " +
+                              $"relationship or previous bond condition isn't met. With one-sided initiation, " +
+                              $"this bond should be created since both cells have keepAdhesion=true.");
+                }
+            }
+        }
+        
+        // RULE 3: Create new bonds between any cells that both have keepAdhesion=true
+        // but don't already have a bond between them (one-sided initiation)
+        Debug.Log($"Potential new connections with one-sided initiation: {potentialNewConnections.Count}");
+        foreach (var (cellA, cellB, cellA_ID, cellB_ID) in potentialNewConnections)
+        {
+            // Use a distance check to ensure we're not connecting cells that are too far apart
+            float distance = Vector3.Distance(cells[cellA].Position, cells[cellB].Position);
+            
+            // Define a reasonable maximum distance for connections
+            // This is a placeholder; you might want to adjust this value or use maxConnectionDistance
+            float maxDistance = 2.3f; // Adjust based on your particle sizes
+            
+            if (distance <= maxDistance)
+            {
+                // Check for half-space occlusion by siblings
+                bool isOccluded = false;
+                
+                // Find siblings of cell A
+                int parentA = particleIDs[cellA].parentID;
+                
+                if (parentToChildren.TryGetValue(parentA, out var siblingsA))
+                {
+                    foreach (int siblingID in siblingsA)
+                    {
+                        if (siblingID == cellA) continue; // Skip self
+                        
+                        // Check if the sibling is occluding the connection by being closer to cell B
+                        float siblingToBDistance = Vector3.Distance(cells[siblingID].Position, cells[cellB].Position);
+                        
+                        if (siblingToBDistance < distance)
+                        {
+                            isOccluded = true;
+                            Debug.Log($"Bond from {cellA_ID} to {cellB_ID} is occluded by sibling " +
+                                      $"{particleIDs[siblingID].GetFormattedID()} " +
+                                      $"(sibling distance: {siblingToBDistance:F2}, direct distance: {distance:F2})");
+                            break;
+                        }
+                    }
+                }
+                
+                // Also check for siblings of cell B occluding the connection
+                if (!isOccluded)
+                {
+                    int parentB = particleIDs[cellB].parentID;
+                    
+                    if (parentToChildren.TryGetValue(parentB, out var siblingsB))
+                    {
+                        foreach (int siblingID in siblingsB)
+                        {
+                            if (siblingID == cellB) continue; // Skip self
+                            
+                            // Check if the sibling is occluding the connection by being closer to cell A
+                            float siblingToADistance = Vector3.Distance(cells[siblingID].Position, cells[cellA].Position);
+                            
+                            if (siblingToADistance < distance)
+                            {
+                                isOccluded = true;
+                                Debug.Log($"Bond from {cellB_ID} to {cellA_ID} is occluded by sibling " +
+                                          $"{particleIDs[siblingID].GetFormattedID()} " +
+                                          $"(sibling distance: {siblingToADistance:F2}, direct distance: {distance:F2})");
+                                break;
+                            }
+                        }
+                    }
+                }
+                
+                // Only create the bond if it's not occluded by siblings
+                if (!isOccluded)
+                {
+                    // Create a new bond of type "Kept" between these cells
+                    Bond newBond = new Bond(cellA, cellB, Bond.BondType.Kept);
+                    bonds.Add(newBond);
+                    
+                    Debug.Log($"One-sided initiation bond created between {cellA_ID} and {cellB_ID} " +
+                             $"(distance: {distance:F2}, max allowed: {maxDistance:F2})");
+                }
+                else
+                {
+                    Debug.Log($"One-sided initiation bond skipped between {cellA_ID} and {cellB_ID} due to occlusion by sibling");
+                }
+            }
+            else
+            {
+                Debug.Log($"One-sided initiation bond skipped between {cellA_ID} and {cellB_ID} " +
+                         $"due to distance {distance:F2} > {maxDistance:F2}");
             }
         }
         
