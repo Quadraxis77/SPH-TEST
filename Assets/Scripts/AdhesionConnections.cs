@@ -227,7 +227,6 @@ public class AdhesionConnections
         // If we don't have split info for this parent, both children inherit bonds
         if (!splitInfoMap.TryGetValue(parentID, out SplitInfo splitInfo))
         {
-            Debug.Log($"No split info for parent {parentID}, defaulting to inherit bond");
             return true;
         }
 
@@ -256,8 +255,6 @@ public class AdhesionConnections
         // Then both Child A and Child B inherit the bond
         if (sharedBond && angleWithSplitPlane <= trenchHalfAngle)
         {
-            // Log that this is a shared bond in the trench
-            Debug.Log($"ZONE: SHARED - Bond in trench zone (angle: {angleWithSplitPlane:F4}°), shared by both children");
             return true; // Both children inherit this bond
         }
         else
@@ -289,13 +286,6 @@ public class AdhesionConnections
             else
                 zoneSide = "A SIDE"; // Negative dot product means A side (opposite of Child B direction)
             
-            if (sameSide) {
-                Debug.Log($"ZONE: {zoneSide} - Bond outside trench (angle: {angleWithSplitPlane:F4}°) - " +
-                          $"Bond and child on same side (child: {childSide:F4}, neighbor: {neighborSide:F4}) - INHERITED");
-            } else {
-                Debug.Log($"ZONE: {zoneSide} - Bond outside trench (angle: {angleWithSplitPlane:F4}°) - " +
-                          $"Bond and child on OPPOSITE sides (child: {childSide:F4}, neighbor: {neighborSide:F4}) - NOT INHERITED");
-            }
             return sameSide;
         }
     }
@@ -311,15 +301,12 @@ public class AdhesionConnections
             GenomeMode genomeMode = controller.GetGenomeModeForParticle(childIndex);
             if (genomeMode != null)
             {
-                Debug.Log($"Checking keep adhesion for child type {childType}, mode: {genomeMode.modeName}");
                 if (childType == 'A')
                 {
-                    Debug.Log($"Child A keepAdhesion = {genomeMode.childA_KeepAdhesion}");
                     return genomeMode.childA_KeepAdhesion;
                 }
                 else if (childType == 'B')
                 {
-                    Debug.Log($"Child B keepAdhesion = {genomeMode.childB_KeepAdhesion}");
                     return genomeMode.childB_KeepAdhesion;
                 }
             }
@@ -386,8 +373,6 @@ public class AdhesionConnections
             cells[i] = cell;
         }
         
-        Debug.Log($"Created {cells.Count} cells from particle positions.");
-        
         // 2. Create valid connections based on sibling relationships
         if (particleIDs != null)
         {
@@ -432,7 +417,6 @@ public class AdhesionConnections
                             
                             // Add sibling bond
                             bonds.Add(new Bond(childA, childB, Bond.BondType.Sibling));
-                            Debug.Log($"Created SIBLING bond between {particleIDs[childA].GetFormattedID()} and {particleIDs[childB].GetFormattedID()}");
                         }
                     }
                 }
@@ -455,8 +439,6 @@ public class AdhesionConnections
             // Now look in the _currentBondsByUniqueId dictionary to find existing connections
             if (_currentBondsByUniqueId != null && _currentBondsByUniqueId.Count > 0)
             {
-                Debug.Log($"Using {_currentBondsByUniqueId.Count} tracked bond connections");
-                
                 // Create a map from uniqueIDs to current particle indices
                 Dictionary<int, int> uniqueIdToIndex = new Dictionary<int, int>();
                 for (int i = 0; i < activeParticleCount; i++)
@@ -494,32 +476,13 @@ public class AdhesionConnections
                                 // Only add if not already present
                                 if (!existingBonds[parentParentId].Contains(connectedIndex))
                                 {
-                                    // Check if this was a sibling bond - if so, we need to determine if it should be kept
-                                    // Sibling bonds from previous generations will be tracked in our bond type dictionary
-                                    int minId = Mathf.Min(parentUniqueId, connectedUniqueId);
-                                    int maxId = Mathf.Max(parentUniqueId, connectedUniqueId);
-                                    
-                                    // If it was a sibling bond in the previous generation, we need to check inheritance rules
-                                    if (_bondTypesByUniqueIdPair.TryGetValue((minId, maxId), out Bond.BondType bondType) && 
-                                        bondType == Bond.BondType.Sibling)
-                                    {
-                                        // For sibling bonds, we need to check inheritance rules during cell division
-                                        // This will be handled later in the inheritance logic
-                                        Debug.Log($"Found previous generation sibling bond between {parentUniqueId} and {connectedUniqueId} - will apply inheritance rules");
-                                    }
-                                    
                                     // Whether it was a sibling bond or not, add it to existing bonds to check inheritance
                                     existingBonds[parentParentId].Add(connectedIndex);
-                                    Debug.Log($"Added connection from parent {parentParentId} to {connectedIndex}");
                                 }
                             }
                         }
                     }
                 }
-            }
-            else
-            {
-                Debug.Log("No existing bond connections found in tracking system");
             }
             
             // RULE 2: Inherit parent connections based on keepAdhesion flag
@@ -539,7 +502,6 @@ public class AdhesionConnections
                     {
                         // Determine if this child should keep parent's adhesions
                         bool keepAdhesion = ShouldKeepAdhesion(particleIDs[childID].childType, childID, controller);
-                        Debug.Log($"Child {particleIDs[childID].GetFormattedID()} keep adhesion: {keepAdhesion}");
                         
                         if (keepAdhesion)
                         {
@@ -559,17 +521,12 @@ public class AdhesionConnections
                                 if (neighborID == childID)
                                     continue;
                                     
-                                // Skip if we already have this bond
-                                Bond newBond = new Bond(childID, neighborID, Bond.BondType.Kept);
-                                
-                                // Skip if we already have this bond (ensure we check both for Sibling and Kept types)
                                 // Create test bonds for both possible types to check
                                 Bond keptBond = new Bond(childID, neighborID, Bond.BondType.Kept);
                                 Bond siblingBond = new Bond(childID, neighborID, Bond.BondType.Sibling);
                                 
                                 if (bonds.Contains(keptBond) || bonds.Contains(siblingBond))
                                 {
-                                    Debug.Log($"Already has bond between {childID} and {neighborID}, skipping");
                                     continue;
                                 }
                                 
@@ -613,7 +570,6 @@ public class AdhesionConnections
                                 // Skip if this child doesn't keep adhesion
                                 if (!thisChildKeepsAdhesion)
                                 {
-                                    Debug.Log($"Child {particleIDs[childID].GetFormattedID()} skipping bond to {particleIDs[neighborID].GetFormattedID()} - this child doesn't keep adhesion");
                                     continue;
                                 }
                                 
@@ -624,18 +580,9 @@ public class AdhesionConnections
                                 // Only add the bond if it should be inherited by this child
                                 if (shouldInherit)
                                 {
-                                    bonds.Add(newBond);
-                                    Debug.Log($"Inherited parent bond: {particleIDs[childID].GetFormattedID()} to {particleIDs[neighborID].GetFormattedID()}");
-                                }
-                                else
-                                {
-                                    Debug.Log($"Bond to {particleIDs[neighborID].GetFormattedID()} belongs to the other side of the split");
+                                    bonds.Add(new Bond(childID, neighborID, Bond.BondType.Kept));
                                 }
                             }
-                        }
-                        else
-                        {
-                            Debug.Log($"Child {particleIDs[childID].GetFormattedID()} NOT keeping adhesion connections from parent");
                         }
                     }
                 }

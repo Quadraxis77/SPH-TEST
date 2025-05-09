@@ -47,8 +47,6 @@ public class ParticleSystemController : MonoBehaviour
     public float labelOffset = 2.5f;
     public float labelScale = 0.5f;
     public Color labelColor = Color.white;
-    public bool showParticleIds = true;
-    public bool showParticleModes = true;
 
     [Header("Adhesion Settings")]
     public Color adhesionLineColor = Color.yellow;
@@ -190,8 +188,6 @@ public class ParticleSystemController : MonoBehaviour
 
     private void SimulateAdhesionConnections()
     {
-        Debug.Log("SimulateAdhesionConnections method is being executed.");
-        
         // Validate that we have the required data before attempting to create connections
         if (cpuParticlePositions == null || cpuParticleRotations == null || 
             activeParticleCount <= 0 || particleIDs == null)
@@ -220,7 +216,6 @@ public class ParticleSystemController : MonoBehaviour
         // Store the current bonds before creating new ones (to enable tracking inheritance)
         if (currentBonds != null && currentBonds.Count > 0) 
         {
-            Debug.Log($"Storing {currentBonds.Count} current bonds before generating new ones");
             AdhesionConnections.SetCurrentBonds(this, currentBonds);
         }
         
@@ -235,8 +230,6 @@ public class ParticleSystemController : MonoBehaviour
             0
         );
         
-        Debug.Log($"Created {cells.Count} cells and {bonds.Count} bonds.");
-        
         // Update current cells and bonds
         currentCells = cells;
         currentBonds = bonds;
@@ -247,8 +240,6 @@ public class ParticleSystemController : MonoBehaviour
 
     void Update()
     {
-        Debug.Log("ParticleSystemController Update is running"); // Confirm script is active
-
         float dt = Time.deltaTime;
         int threadGroups = Mathf.CeilToInt(particleCount / 64f);
 
@@ -338,32 +329,195 @@ public class ParticleSystemController : MonoBehaviour
         UpdateParticleLabels();  // refresh labels
     }
 
-    private void UpdateDragVisualization()
+    // Update adhesion connection positions with the latest particle positions
+    private void UpdateAdhesionConnectionsVisual()
     {
-        if (selectedParticleID != -1)
+        if (currentCells == null || currentBonds == null || currentBonds.Count == 0)
         {
-            // Update circle
-            Vector3 cameraForward = Camera.main.transform.forward;
-            Vector3 cameraRight = Camera.main.transform.right;
-            Vector3 cameraUp = Vector3.Cross(cameraForward, cameraRight);
-
-            for (int i = 0; i < 36; i++)
+            // Destroy all existing line renderers if no bonds exist
+            foreach (var line in adhesionLineRenderers)
             {
-                float angle = Mathf.Deg2Rad * (i * 10);
-                Vector3 point = dragTargetWorld + (Mathf.Cos(angle) * cameraRight + Mathf.Sin(angle) * cameraUp) * dragCircleRadius;
-                circleRenderer.SetPosition(i, point);
+                if (line != null) Destroy(line.gameObject);
             }
-            circleRenderer.enabled = true;
-
-            // Update line
-            lineRenderer.SetPosition(0, cpuParticlePositions[selectedParticleID]);
-            lineRenderer.SetPosition(1, dragTargetWorld);
-            lineRenderer.enabled = true;
+            adhesionLineRenderers.Clear();
+            return;
         }
-        else
+
+        // Create or get parent GameObject for adhesion connections
+        GameObject adhesionsParent = GameObject.Find("AdhesionConnections");
+        if (adhesionsParent == null)
         {
-            circleRenderer.enabled = false;
-            lineRenderer.enabled = false;
+            adhesionsParent = new GameObject("AdhesionConnections");
+            adhesionsParent.transform.SetParent(transform);
+        }
+
+        // First, clean up any outdated line renderers - keep track of current valid bonds
+        HashSet<string> validBonds = new HashSet<string>();
+        
+        // Create this mapping for quick lookups in the update phase
+        Dictionary<string, int> idToIndexMap = new Dictionary<string, int>();
+        for (int i = 0; i < activeParticleCount; i++)
+        {
+            if (i < particleIDs.Length)
+            {
+                string id = particleIDs[i].GetFormattedID();
+                idToIndexMap[id] = i;
+            }
+        }
+        
+        // Build valid bonds set using the current bond data
+        foreach (var bond in currentBonds)
+        {
+            if (bond.A >= 0 && bond.A < activeParticleCount && 
+                bond.B >= 0 && bond.B < activeParticleCount)
+            {
+                string idA = particleIDs[bond.A].GetFormattedID();
+                string idB = particleIDs[bond.B].GetFormattedID();
+                
+                // Create a consistent bond key (always put lower ID first to avoid duplicates)
+                string bondKey = string.Compare(idA, idB) < 0 ? 
+                    $"Bond_{idA}_to_{idB}" : 
+                    $"Bond_{idB}_to_{idA}";
+                
+                validBonds.Add(bondKey);
+            }
+        }
+        
+        // Remove any line renderers that are not in the valid bonds set
+        for (int i = adhesionLineRenderers.Count - 1; i >= 0; i--)
+        {
+            var line = adhesionLineRenderers[i];
+            if (line == null)
+            {
+                adhesionLineRenderers.RemoveAt(i);
+                continue;
+            }
+            
+            string name = line.gameObject.name;
+            if (!validBonds.Contains(name))
+            {
+                Destroy(line.gameObject);
+                adhesionLineRenderers.RemoveAt(i);
+            }
+        }
+
+        // Create new line renderers for any new bonds
+        foreach (var bond in currentBonds)
+        {
+            if (bond.A >= 0 && bond.A < activeParticleCount && 
+                bond.B >= 0 && bond.B < activeParticleCount)
+            {
+                Vector3 posA = cpuParticlePositions[bond.A];
+                Vector3 posB = cpuParticlePositions[bond.B];
+
+                if (IsValidPosition(posA) && IsValidPosition(posB))
+                {
+                    // Get formatted IDs for the particles in this bond
+                    string idA = particleIDs[bond.A].GetFormattedID();
+                    string idB = particleIDs[bond.B].GetFormattedID();
+                    
+                    // Create a consistent bond key (always put lower ID first to avoid duplicates)
+                    string bondKey = string.Compare(idA, idB) < 0 ? 
+                        $"Bond_{idA}_to_{idB}" : 
+                        $"Bond_{idB}_to_{idA}";
+                    
+                    // Store which actual particle indices correspond to which IDs for this bond
+                    int indexA = bond.A;
+                    int indexB = bond.B;
+                    
+                    // Check if this bond already exists
+                    bool bondExists = false;
+                    foreach (var line in adhesionLineRenderers)
+                    {
+                        if (line != null && line.gameObject.name == bondKey)
+                        {
+                            bondExists = true;
+                            line.SetPosition(0, posA);
+                            line.SetPosition(1, posB);
+                            break;
+                        }
+                    }
+                    
+                    // Create new bond if it doesn't exist
+                    if (!bondExists)
+                    {
+                        GameObject lineObject = new GameObject(bondKey);
+                        lineObject.transform.SetParent(adhesionsParent.transform);
+                        
+                        LineRenderer lineRenderer = lineObject.AddComponent<LineRenderer>();
+                        lineRenderer.startWidth = 0.05f;
+                        lineRenderer.endWidth = 0.05f;
+                        lineRenderer.material = new Material(Shader.Find("Sprites/Default"));
+                        lineRenderer.material.color = adhesionLineColor;
+                        lineRenderer.positionCount = 2;
+                        lineRenderer.SetPosition(0, posA);
+                        lineRenderer.SetPosition(1, posB);
+
+                        adhesionLineRenderers.Add(lineRenderer);
+                    }
+                }
+            }
+        }
+    }
+
+    // Update labels each frame
+    private void UpdateParticleLabels()
+    {
+        if (!showParticleLabels)
+        {
+            if (particleLabels != null)
+                foreach (var lbl in particleLabels) if (lbl != null) lbl.enabled = false;
+            return;
+        }
+        if (Camera.main == null) return;
+
+        int count = Mathf.Min(activeParticleCount, particleLabels.Length);
+        for (int i = 0; i < count; i++)
+        {
+            var tmp = particleLabels[i];
+            if (tmp == null) continue;
+            
+            // Validate particle position before using it
+            Vector3 particlePos = cpuParticlePositions[i];
+            if (float.IsNaN(particlePos.x) || float.IsNaN(particlePos.y) || float.IsNaN(particlePos.z))
+            {
+                tmp.enabled = false;
+                continue; // Skip this label if the position contains NaN
+            }
+            
+            // Position labels slightly lower than before by adding a small negative Y offset
+            Vector3 pos = particlePos + (Vector3.up * labelOffset * 0.5f);
+            
+            // Additional validation before setting the position
+            if (float.IsNaN(pos.x) || float.IsNaN(pos.y) || float.IsNaN(pos.z))
+            {
+                tmp.enabled = false;
+                continue;
+            }
+            
+            tmp.transform.position = pos;
+            tmp.transform.rotation = Camera.main.transform.rotation;
+            
+            // Display the formatted ID
+            string text = "";
+            if (particleIDs != null && i < particleIDs.Length) 
+            {
+                text = particleIDs[i].GetFormattedID();
+                
+                // Update GameObject name to use the formatted ID for better hierarchy organization
+                string labelName = $"Label_{text}";
+                if (tmp.gameObject.name != labelName)
+                {
+                    tmp.gameObject.name = labelName;
+                }
+            }
+            
+            tmp.text = text;
+            tmp.enabled = true;
+        }
+        for (int i = count; i < particleLabels.Length; i++)
+        {
+            if (particleLabels[i] != null) particleLabels[i].enabled = false;
         }
     }
 
@@ -542,8 +696,6 @@ public class ParticleSystemController : MonoBehaviour
 
     private void InitializeParticles()
     {
-        Debug.Log("Initializing particles..."); // Trace start
-
         // Initialize particle IDs array
         if (particleIDs == null || particleIDs.Length != particleCount)
         {
@@ -573,8 +725,6 @@ public class ParticleSystemController : MonoBehaviour
         computeShader.SetBuffer(kernelInitParticles, "torqueAccumBuffer", torqueAccumBuffer);
         computeShader.Dispatch(kernelInitParticles, Mathf.CeilToInt(particleCount / 64f), 1, 1);
 
-        Debug.Log($"Initialized {initialParticleCount} particles."); // Trace particle count
-
         // Explicitly set the initial mode for the first particle
         if (genome != null && genome.modes.Count > 0)
         {
@@ -584,7 +734,6 @@ public class ParticleSystemController : MonoBehaviour
             firstParticle[0].modeIndex = initialModeIndex;
 
             particleBuffer.SetData(firstParticle, 0, 0, 1);
-            Debug.Log($"Set initial mode index for the first particle: {initialModeIndex}"); // Trace mode index
         }
 
         if (cellSplitTimers == null || cellSplitTimers.Length < particleCount)
@@ -614,8 +763,6 @@ public class ParticleSystemController : MonoBehaviour
                 cellSplitTimers[i] = 0f;
             }
         }
-
-        Debug.Log("Particle initialization completed."); // Trace end
     }
 
     private int GetInitialModeIndex()
@@ -861,8 +1008,6 @@ public class ParticleSystemController : MonoBehaviour
             // Use global counter for uniqueIDs to ensure they're never reused
             int childAUniqueID = nextUniqueIDCounter++;
             int childBUniqueID = nextUniqueIDCounter++;
-            
-            Debug.Log($"Cell split: Parent {originalParentID} → Children {childAUniqueID}(A) and {childBUniqueID}(B)");
 
             // Register this cell division with the AdhesionConnections class to track split direction
             AdhesionConnections.RegisterCellDivision(
@@ -1001,18 +1146,9 @@ public class ParticleSystemController : MonoBehaviour
         });
     }
 
-    // Validate quaternion magnitude
-    private bool IsQuaternionValid(Quaternion q)
-    {
-        float mag = Mathf.Sqrt(q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w);
-        return !Mathf.Approximately(mag, 0f) && Mathf.Abs(mag - 1f) <= 0.01f;
-    }
-
     // Resize particle buffers when more capacity is needed
     private void ResizeParticleBuffers(int newCapacity)
     {
-        Debug.Log($"Resizing particle buffers from {particleCount} to {newCapacity}");
-        
         // Store old data
         Particle[] oldParticleData = new Particle[particleCount];
         particleBuffer.GetData(oldParticleData);
@@ -1070,14 +1206,6 @@ public class ParticleSystemController : MonoBehaviour
         
         // Reinitialize particle labels with new count
         InitializeParticleLabels();
-        
-        Debug.Log($"Successfully resized buffers to capacity {newCapacity}");
-    }
-
-    // Clear anchors when disabled
-    private void OnDisable()
-    {
-        // No specific cleanup needed
     }
 
     // Initialize text labels for each particle
@@ -1119,210 +1247,7 @@ public class ParticleSystemController : MonoBehaviour
                 tmp.enabled = false;
                 particleLabels[i] = tmp;
             }
-            
-            // The array still needs to be fully initialized to avoid null reference errors
-            // But we don't need to create GameObjects for inactive particles
-            Debug.Log($"Created {activeParticleCount} particle labels (out of {particleCount} capacity)");
         }
-    }
-
-    // Update labels each frame
-    private void UpdateParticleLabels()
-    {
-        if (!showParticleLabels)
-        {
-            if (particleLabels != null)
-                foreach (var lbl in particleLabels) if (lbl != null) lbl.enabled = false;
-            return;
-        }
-        if (Camera.main == null) return;
-
-        int count = Mathf.Min(activeParticleCount, particleLabels.Length);
-        for (int i = 0; i < count; i++)
-        {
-            var tmp = particleLabels[i];
-            if (tmp == null) continue;
-            
-            // Validate particle position before using it
-            Vector3 particlePos = cpuParticlePositions[i];
-            if (float.IsNaN(particlePos.x) || float.IsNaN(particlePos.y) || float.IsNaN(particlePos.z))
-            {
-                tmp.enabled = false;
-                continue; // Skip this label if the position contains NaN
-            }
-            
-            // Position labels slightly lower than before by adding a small negative Y offset
-            Vector3 pos = particlePos + (Vector3.up * labelOffset * 0.5f);
-            
-            // Additional validation before setting the position
-            if (float.IsNaN(pos.x) || float.IsNaN(pos.y) || float.IsNaN(pos.z))
-            {
-                tmp.enabled = false;
-                continue;
-            }
-            
-            tmp.transform.position = pos;
-            tmp.transform.rotation = Camera.main.transform.rotation;
-            string text = "";
-            
-            // Use the formatted ID instead of simple array index
-            if (showParticleIds && particleIDs != null && i < particleIDs.Length) 
-            {
-                text = particleIDs[i].GetFormattedID();
-                
-                // Update GameObject name to use the formatted ID for better hierarchy organization
-                string labelName = $"Label_{text}";
-                if (tmp.gameObject.name != labelName)
-                {
-                    tmp.gameObject.name = labelName;
-                }
-            }
-            
-            tmp.text = text;
-            tmp.enabled = true;
-        }
-        for (int i = count; i < particleLabels.Length; i++)
-        {
-            if (particleLabels[i] != null) particleLabels[i].enabled = false;
-        }
-    }
-
-    // Update adhesion connection positions with the latest particle positions
-    private void UpdateAdhesionConnectionsVisual()
-    {
-        if (currentCells == null || currentBonds == null || currentBonds.Count == 0)
-        {
-            // Destroy all existing line renderers if no bonds exist
-            foreach (var line in adhesionLineRenderers)
-            {
-                if (line != null) Destroy(line.gameObject);
-            }
-            adhesionLineRenderers.Clear();
-            return;
-        }
-
-        // Create or get parent GameObject for adhesion connections
-        GameObject adhesionsParent = GameObject.Find("AdhesionConnections");
-        if (adhesionsParent == null)
-        {
-            adhesionsParent = new GameObject("AdhesionConnections");
-            adhesionsParent.transform.SetParent(transform);
-        }
-
-        // First, clean up any outdated line renderers - keep track of current valid bonds
-        HashSet<string> validBonds = new HashSet<string>();
-        
-        // Create this mapping for quick lookups in the update phase
-        Dictionary<string, int> idToIndexMap = new Dictionary<string, int>();
-        for (int i = 0; i < activeParticleCount; i++)
-        {
-            if (i < particleIDs.Length)
-            {
-                string id = particleIDs[i].GetFormattedID();
-                idToIndexMap[id] = i;
-            }
-        }
-        
-        // Build valid bonds set using the current bond data
-        foreach (var bond in currentBonds)
-        {
-            if (bond.A >= 0 && bond.A < activeParticleCount && 
-                bond.B >= 0 && bond.B < activeParticleCount)
-            {
-                string idA = particleIDs[bond.A].GetFormattedID();
-                string idB = particleIDs[bond.B].GetFormattedID();
-                
-                // Create a consistent bond key (always put lower ID first to avoid duplicates)
-                string bondKey = string.Compare(idA, idB) < 0 ? 
-                    $"Bond_{idA}_to_{idB}" : 
-                    $"Bond_{idB}_to_{idA}";
-                
-                validBonds.Add(bondKey);
-            }
-        }
-        
-        // Remove any line renderers that are not in the valid bonds set
-        for (int i = adhesionLineRenderers.Count - 1; i >= 0; i--)
-        {
-            var line = adhesionLineRenderers[i];
-            if (line == null)
-            {
-                adhesionLineRenderers.RemoveAt(i);
-                continue;
-            }
-            
-            string name = line.gameObject.name;
-            if (!validBonds.Contains(name))
-            {
-                Destroy(line.gameObject);
-                adhesionLineRenderers.RemoveAt(i);
-            }
-        }
-
-        // Create new line renderers for any new bonds
-        foreach (var bond in currentBonds)
-        {
-            if (bond.A >= 0 && bond.A < activeParticleCount && 
-                bond.B >= 0 && bond.B < activeParticleCount)
-            {
-                Vector3 posA = cpuParticlePositions[bond.A];
-                Vector3 posB = cpuParticlePositions[bond.B];
-
-                if (IsValidPosition(posA) && IsValidPosition(posB))
-                {
-                    // Get formatted IDs for the particles in this bond
-                    string idA = particleIDs[bond.A].GetFormattedID();
-                    string idB = particleIDs[bond.B].GetFormattedID();
-                    
-                    // Create a consistent bond key (always put lower ID first to avoid duplicates)
-                    string bondKey = string.Compare(idA, idB) < 0 ? 
-                        $"Bond_{idA}_to_{idB}" : 
-                        $"Bond_{idB}_to_{idA}";
-                    
-                    // Store which actual particle indices correspond to which IDs for this bond
-                    int indexA = bond.A;
-                    int indexB = bond.B;
-                    
-                    // Check if this bond already exists
-                    bool bondExists = false;
-                    foreach (var line in adhesionLineRenderers)
-                    {
-                        if (line != null && line.gameObject.name == bondKey)
-                        {
-                            bondExists = true;
-                            line.SetPosition(0, posA);
-                            line.SetPosition(1, posB);
-                            break;
-                        }
-                    }
-                    
-                    // Create new bond if it doesn't exist
-                    if (!bondExists)
-                    {
-                        GameObject lineObject = new GameObject(bondKey);
-                        lineObject.transform.SetParent(adhesionsParent.transform);
-                        
-                        LineRenderer lineRenderer = lineObject.AddComponent<LineRenderer>();
-                        lineRenderer.startWidth = 0.05f;
-                        lineRenderer.endWidth = 0.05f;
-                        lineRenderer.material = new Material(Shader.Find("Sprites/Default"));
-                        lineRenderer.material.color = adhesionLineColor;
-                        lineRenderer.positionCount = 2;
-                        lineRenderer.SetPosition(0, posA);
-                        lineRenderer.SetPosition(1, posB);
-
-                        adhesionLineRenderers.Add(lineRenderer);
-                    }
-                }
-            }
-        }
-    }
-
-    // Helper to check if a position is valid
-    private bool IsValidPosition(Vector3 position)
-    {
-        return !float.IsNaN(position.x) && !float.IsNaN(position.y) && !float.IsNaN(position.z) &&
-               !float.IsInfinity(position.x) && !float.IsInfinity(position.y) && !float.IsInfinity(position.z);
     }
 
     private void CreateLabelsForNewParticles(List<int> indices, List<string> ids)
@@ -1371,8 +1296,6 @@ public class ParticleSystemController : MonoBehaviour
                 tmp.enabled = false;
                 particleLabels[index] = tmp;
             }
-            
-            Debug.Log($"Created/updated label for particle at index {index} with ID {id}");
         }
     }
 
@@ -1430,5 +1353,41 @@ public class ParticleSystemController : MonoBehaviour
     public AdhesionConnections.ParticleIDData[] GetParticleIDs()
     {
         return particleIDs;
+    }
+
+    private void UpdateDragVisualization()
+    {
+        if (selectedParticleID != -1)
+        {
+            // Update circle
+            Vector3 cameraForward = Camera.main.transform.forward;
+            Vector3 cameraRight = Camera.main.transform.right;
+            Vector3 cameraUp = Vector3.Cross(cameraForward, cameraRight);
+
+            for (int i = 0; i < 36; i++)
+            {
+                float angle = Mathf.Deg2Rad * (i * 10);
+                Vector3 point = dragTargetWorld + (Mathf.Cos(angle) * cameraRight + Mathf.Sin(angle) * cameraUp) * dragCircleRadius;
+                circleRenderer.SetPosition(i, point);
+            }
+            circleRenderer.enabled = true;
+
+            // Update line
+            lineRenderer.SetPosition(0, cpuParticlePositions[selectedParticleID]);
+            lineRenderer.SetPosition(1, dragTargetWorld);
+            lineRenderer.enabled = true;
+        }
+        else
+        {
+            circleRenderer.enabled = false;
+            lineRenderer.enabled = false;
+        }
+    }
+
+    // Helper to check if a position is valid
+    private bool IsValidPosition(Vector3 position)
+    {
+        return !float.IsNaN(position.x) && !float.IsNaN(position.y) && !float.IsNaN(position.z) &&
+               !float.IsInfinity(position.x) && !float.IsInfinity(position.y) && !float.IsInfinity(position.z);
     }
 }
