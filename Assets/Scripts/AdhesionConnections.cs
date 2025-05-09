@@ -237,7 +237,7 @@ public class AdhesionConnections
         Vector3 bondDir = toNeighbor.normalized;
         
         // Define the trench half angle (in degrees) - ensure consistency
-        const float trenchHalfAngle = 9f; // Total trench angle will be 30 degrees
+        const float trenchHalfAngle = 9f; // Total trench angle will be 18 degrees (±9° from split plane)
         
         // Calculate the angle between the bond direction and the split plane
         // This is done by first finding the dot product with the split axis
@@ -250,44 +250,49 @@ public class AdhesionConnections
         // Round the angle to a small number of decimal places to avoid floating point inconsistencies
         angleWithSplitPlane = (float)Math.Round(angleWithSplitPlane, 4);
         
-        // If this is a shared bond (both children have keepAdhesion=true) AND
-        // the bond direction is within the trench zone (within trenchHalfAngle of the split plane)
-        // Then both Child A and Child B inherit the bond
-        if (sharedBond && angleWithSplitPlane <= trenchHalfAngle)
+        // Determine which zone this bond belongs to
+        string zone;
+        
+        // First check if it's in the trench zone
+        if (angleWithSplitPlane <= trenchHalfAngle)
         {
-            return true; // Both children inherit this bond
+            zone = "TRENCH ZONE";
+            
+            // For bonds in the trench zone, the side doesn't matter
+            // Any child with keepAdhesion=true automatically inherits the bond
+            // The keepAdhesion flag is already checked before calling this method
+            return true;
         }
+        
+        // Calculate vector from split position to child
+        Vector3 toChild = childPos - splitInfo.splitPosition;
+        
+        // For bonds outside the trench, assign to whichever child is on the same side 
+        // Check if they're on the same side of the splitting plane
+        float neighborSide = Vector3.Dot(toNeighbor, splitInfo.splitDirection);
+        float childSide = Vector3.Dot(toChild, splitInfo.splitDirection);
+        
+        // Apply a small epsilon to avoid floating point comparison issues
+        const float epsilon = 0.0001f;
+        
+        // Round both values to minimize floating point differences
+        neighborSide = (float)Math.Round(neighborSide, 4);
+        childSide = (float)Math.Round(childSide, 4);
+        
+        // More robust check for same side (both positive or both negative)
+        bool sameSide = (childSide > epsilon && neighborSide > epsilon) || 
+                       (childSide < -epsilon && neighborSide < -epsilon);
+        
+        // Determine which specific side this bond is on (A side or B side)
+        if (neighborSide > epsilon)
+            zone = "B SIDE"; // Positive dot product means B side (Child B direction)
+        else if (neighborSide < -epsilon)
+            zone = "A SIDE"; // Negative dot product means A side (opposite of Child B direction)
         else
-        {
-            // Calculate vector from split position to child
-            Vector3 toChild = childPos - splitInfo.splitPosition;
+            zone = "TRENCH ZONE"; // Very close to the split plane (should have been caught above, but just in case)
             
-            // For bonds outside the trench, assign to whichever child is on the same side 
-            // Check if they're on the same side of the splitting plane
-            float neighborSide = Vector3.Dot(toNeighbor, splitInfo.splitDirection);
-            float childSide = Vector3.Dot(toChild, splitInfo.splitDirection);
-            
-            // Apply a small epsilon to avoid floating point comparison issues
-            const float epsilon = 0.0001f;
-            
-            // Child inherits bond if it's on the same side as the neighbor
-            // Round both values to minimize floating point differences
-            neighborSide = (float)Math.Round(neighborSide, 4);
-            childSide = (float)Math.Round(childSide, 4);
-            
-            // More robust check for same side (both positive or both negative)
-            bool sameSide = (childSide > epsilon && neighborSide > epsilon) || 
-                           (childSide < -epsilon && neighborSide < -epsilon);
-            
-            // Determine which side this bond is on (A side or B side)
-            string zoneSide;
-            if (childSide > 0)
-                zoneSide = "B SIDE"; // Positive dot product means B side (Child B direction)
-            else
-                zoneSide = "A SIDE"; // Negative dot product means A side (opposite of Child B direction)
-            
-            return sameSide;
-        }
+        // For non-trench zone bonds, maintain strict side assignment
+        return sameSide;
     }
 
     /// <summary>
@@ -530,13 +535,33 @@ public class AdhesionConnections
                                     continue;
                                 }
                                 
-                                // Check if child and neighbor are on the same side of the split
                                 // First determine if this child specifically has keepAdhesion enabled
                                 bool thisChildKeepsAdhesion = ShouldKeepAdhesion(
                                     particleIDs[childID].childType, 
                                     childID, 
                                     controller
                                 );
+                                
+                                // Skip if this child doesn't keep adhesion
+                                if (!thisChildKeepsAdhesion)
+                                {
+                                    continue;
+                                }
+                                
+                                // For the handshake, check if the neighbor also wants to keep connections
+                                // Find the parent of the neighbor
+                                int neighborParentID = particleIDs[neighborID].parentID;
+                                bool neighborKeepsAdhesion = ShouldKeepAdhesion(
+                                    particleIDs[neighborID].childType, 
+                                    neighborID, 
+                                    controller
+                                );
+                                
+                                // Only proceed if both sides want to keep the connection
+                                if (!neighborKeepsAdhesion)
+                                {
+                                    continue; // Skip if the other side doesn't want to keep the connection
+                                }
                                 
                                 bool isSharedBond = false;
                                 
@@ -565,12 +590,6 @@ public class AdhesionConnections
                                     }
                                     
                                     isSharedBond = allSiblingsKeepAdhesion;
-                                }
-                                
-                                // Skip if this child doesn't keep adhesion
-                                if (!thisChildKeepsAdhesion)
-                                {
-                                    continue;
                                 }
                                 
                                 // Check if this bond should be inherited based on position relative to split plane
