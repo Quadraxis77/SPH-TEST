@@ -167,14 +167,12 @@ MonoBehaviour:
   sphereMesh: {fileID: 10207, guid: 0000000000000000e000000000000000, type: 0}
   dragCircleColor: {r: 0, g: 1, b: 0, a: 1}
   dragCircleRadius: 1
-  showAdhesionConnections: 1
-  adhesionLineWidth: 0.2
   showParticleLabels: 1
   labelOffset: 2.5
   labelScale: 0.5
   labelColor: {r: 1, g: 1, b: 1, a: 1}
-  showParticleIds: 1
-  showParticleModes: 1
+  adhesionLineColor: {r: 1, g: 0.92156863, b: 0.015686275, a: 1}
+  adhesionConnectionDistance: 2.1
 --- !u!4 &412325791
 Transform:
   m_ObjectHideFlags: 0

@@ -148,6 +148,32 @@ public class ParticleSystemController : MonoBehaviour
     // Particle label array
     private TextMeshPro[] particleLabels;
 
+    // Add a new buffer to hold genome mode data for the shader
+    private ComputeBuffer genomeModesBuffer;
+    
+    // Struct that matches the GenomeAdhesionData in the shader
+    private struct GenomeAdhesionData
+    {
+        public int parentMakeAdhesion;
+        public int childA_KeepAdhesion;
+        public int childB_KeepAdhesion;
+        public float adhesionRestLength;
+        public float adhesionSpringStiffness;
+        public float adhesionSpringDamping;
+        public uint colorPacked;
+        public float orientConstraintStrength;
+        public float maxAngleDeviation;
+    }
+    
+    // Utility function to pack a Color into a uint
+    private uint PackColorToUint(Color color)
+    {
+        uint r = (uint)(color.r * 255);
+        uint g = (uint)(color.g * 255);
+        uint b = (uint)(color.b * 255);
+        return (r << 16) | (g << 8) | b;
+    }
+
     void Start()
     {
         Application.targetFrameRate = 144;
@@ -175,6 +201,9 @@ public class ParticleSystemController : MonoBehaviour
 
         // Initialize all buffers
         InitializeBuffers();
+        
+        // Create and initialize the genome modes buffer for colors
+        UpdateGenomeModesBuffer();
         
         // Initialize particles with genome properties
         InitializeParticles();
@@ -596,6 +625,9 @@ public class ParticleSystemController : MonoBehaviour
         // Clear static data and reinitialize particles when genome changes
         AdhesionConnections.ClearStaticData();
         
+        // Update the genome modes buffer when the genome changes
+        UpdateGenomeModesBuffer();
+        
         // Reinitialize particles when genome changes
         if (particleBuffer != null)
         {
@@ -672,6 +704,7 @@ public class ParticleSystemController : MonoBehaviour
         gridNext?.Release();
         gridParticleIndices?.Release();
         torqueAccumBuffer?.Release();
+        genomeModesBuffer?.Release(); // Release the genome modes buffer
 
         if (circleRenderer != null) Destroy(circleRenderer.gameObject);
         if (lineRenderer != null) Destroy(lineRenderer.gameObject);
@@ -1384,6 +1417,69 @@ public class ParticleSystemController : MonoBehaviour
         }
     }
 
+    /// <summary>
+    /// Creates and populates the genome modes buffer with genome mode data for the shader
+    /// </summary>
+    private void UpdateGenomeModesBuffer()
+    {
+        if (genome == null || genome.modes.Count == 0)
+        {
+            Debug.LogWarning("Cannot update genome modes buffer: No genome or modes available");
+            return;
+        }
+
+        // Release existing buffer if any
+        if (genomeModesBuffer != null)
+        {
+            genomeModesBuffer.Release();
+            genomeModesBuffer = null;
+        }
+
+        // Create a new buffer with the current number of genome modes
+        int modeCount = genome.modes.Count;
+        genomeModesBuffer = new ComputeBuffer(modeCount, 9 * 4); // 9 fields * 4 bytes each
+
+        // Create and populate the data array
+        GenomeAdhesionData[] modeData = new GenomeAdhesionData[modeCount];
+
+        for (int i = 0; i < modeCount; i++)
+        {
+            GenomeMode mode = genome.modes[i];
+            
+            // Convert booleans to integers for the shader
+            int parentMakeAdhesion = mode.parentMakeAdhesion ? 1 : 0;
+            int childA_KeepAdhesion = mode.childA_KeepAdhesion ? 1 : 0;
+            int childB_KeepAdhesion = mode.childB_KeepAdhesion ? 1 : 0;
+            
+            // Pack the color into a uint using our utility method
+            uint colorPacked = PackColorToUint(mode.modeColor);
+            
+            modeData[i] = new GenomeAdhesionData
+            {
+                parentMakeAdhesion = parentMakeAdhesion,
+                childA_KeepAdhesion = childA_KeepAdhesion,
+                childB_KeepAdhesion = childB_KeepAdhesion,
+                adhesionRestLength = mode.adhesionRestLength,
+                adhesionSpringStiffness = mode.adhesionSpringStiffness,
+                adhesionSpringDamping = mode.adhesionSpringDamping,
+                colorPacked = colorPacked,
+                orientConstraintStrength = mode.orientationConstraintStrength,
+                maxAngleDeviation = mode.maxAllowedAngleDeviation
+            };
+            
+            Debug.Log($"Mode {i} ({mode.modeName}): Packed color 0x{colorPacked:X6} from {mode.modeColor}");
+        }
+        
+        // Set the data to the buffer
+        genomeModesBuffer.SetData(modeData);
+        
+        // Set buffer and default mode index in the shader material
+        sphereMaterial.SetBuffer("genomeModesBuffer", genomeModesBuffer);
+        sphereMaterial.SetInt("defaultGenomeMode", GetInitialModeIndex());
+        
+        Debug.Log($"Updated genome modes buffer with {modeCount} modes");
+    }
+    
     // Helper to check if a position is valid
     private bool IsValidPosition(Vector3 position)
     {
