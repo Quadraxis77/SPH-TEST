@@ -335,7 +335,7 @@ public class AdhesionConnections
     }
 
     /// <summary>
-    /// Checks if the two cells can form a valid adhesion connection (one-sided initiation is allowed if both have keepAdhesion)
+    /// Checks if the two cells can form a valid adhesion connection (no one-sided initiation allowed)
     /// </summary>
     private static bool CanFormValidAdhesion(
         int childID, 
@@ -364,8 +364,8 @@ public class AdhesionConnections
                      $"childKeepsAdhesion={childKeepsAdhesion}, neighborKeepsAdhesion={neighborKeepsAdhesion}");
         }
         
-        // One-sided initiation is allowed as long as both sides have keepAdhesion=true
-        // This means either side can initiate, but both must be able to maintain adhesion
+        // Both cells must have keepAdhesion=true to form a bond
+        // No one-sided initiation is allowed
         return childKeepsAdhesion && neighborKeepsAdhesion;
     }
 
@@ -752,89 +752,33 @@ public class AdhesionConnections
         // RULE 3: Create new bonds between any cells that both have keepAdhesion=true
         // but don't already have a bond between them (one-sided initiation)
         Debug.Log($"Potential new connections with one-sided initiation: {potentialNewConnections.Count}");
-        foreach (var (cellA, cellB, cellA_ID, cellB_ID) in potentialNewConnections)
-        {
-            // Use a distance check to ensure we're not connecting cells that are too far apart
-            float distance = Vector3.Distance(cells[cellA].Position, cells[cellB].Position);
+        
+        // Log information about potential connections but DO NOT create one-sided bonds
+        if (potentialNewConnections.Count > 0) {
+            Debug.Log($"Found {potentialNewConnections.Count} potential connections that would have been created with one-sided initiation");
+            Debug.Log("One-sided bond formation is disabled - these bonds will NOT be created");
             
-            // Define a reasonable maximum distance for connections
-            // This is a placeholder; you might want to adjust this value or use maxConnectionDistance
-            float maxDistance = 2.3f; // Adjust based on your particle sizes
-            
-            if (distance <= maxDistance)
-            {
-                // Check for half-space occlusion by siblings
-                bool isOccluded = false;
+            foreach (var (cellA, cellB, cellA_ID, cellB_ID) in potentialNewConnections) {
+                // Calculate distance for logging purposes only
+                float distance = Vector3.Distance(cells[cellA].Position, cells[cellB].Position);
                 
-                // Find siblings of cell A
-                int parentA = particleIDs[cellA].parentID;
+                bool isOccluded = IsOccludedByAnyCloserSibling(
+                    cellA, 
+                    cellB, 
+                    cells, 
+                    parentToChildren, 
+                    particleIDs, 
+                    distance
+                );
                 
-                if (parentToChildren.TryGetValue(parentA, out var siblingsA))
-                {
-                    foreach (int siblingID in siblingsA)
-                    {
-                        if (siblingID == cellA) continue; // Skip self
-                        
-                        // Check if the sibling is occluding the connection by being closer to cell B
-                        float siblingToBDistance = Vector3.Distance(cells[siblingID].Position, cells[cellB].Position);
-                        
-                        if (siblingToBDistance < distance)
-                        {
-                            isOccluded = true;
-                            Debug.Log($"Bond from {cellA_ID} to {cellB_ID} is occluded by sibling " +
-                                      $"{particleIDs[siblingID].GetFormattedID()} " +
-                                      $"(sibling distance: {siblingToBDistance:F2}, direct distance: {distance:F2})");
-                            break;
-                        }
-                    }
-                }
-                
-                // Also check for siblings of cell B occluding the connection
-                if (!isOccluded)
-                {
-                    int parentB = particleIDs[cellB].parentID;
-                    
-                    if (parentToChildren.TryGetValue(parentB, out var siblingsB))
-                    {
-                        foreach (int siblingID in siblingsB)
-                        {
-                            if (siblingID == cellB) continue; // Skip self
-                            
-                            // Check if the sibling is occluding the connection by being closer to cell A
-                            float siblingToADistance = Vector3.Distance(cells[siblingID].Position, cells[cellA].Position);
-                            
-                            if (siblingToADistance < distance)
-                            {
-                                isOccluded = true;
-                                Debug.Log($"Bond from {cellB_ID} to {cellA_ID} is occluded by sibling " +
-                                          $"{particleIDs[siblingID].GetFormattedID()} " +
-                                          $"(sibling distance: {siblingToADistance:F2}, direct distance: {distance:F2})");
-                                break;
-                            }
-                        }
-                    }
-                }
-                
-                // Only create the bond if it's not occluded by siblings
-                if (!isOccluded)
-                {
-                    // Create a new bond of type "Kept" between these cells
-                    Bond newBond = new Bond(cellA, cellB, Bond.BondType.Kept);
-                    bonds.Add(newBond);
-                    
-                    Debug.Log($"One-sided initiation bond created between {cellA_ID} and {cellB_ID} " +
-                             $"(distance: {distance:F2}, max allowed: {maxDistance:F2})");
-                }
-                else
-                {
-                    Debug.Log($"One-sided initiation bond skipped between {cellA_ID} and {cellB_ID} due to occlusion by sibling");
+                if (isOccluded) {
+                    Debug.Log($"Would have skipped bond between {cellA_ID} and {cellB_ID} due to occlusion by sibling");
+                } else {
+                    Debug.Log($"Would have created bond between {cellA_ID} and {cellB_ID} with one-sided initiation (distance: {distance})");
                 }
             }
-            else
-            {
-                Debug.Log($"One-sided initiation bond skipped between {cellA_ID} and {cellB_ID} " +
-                         $"due to distance {distance:F2} > {maxDistance:F2}");
-            }
+        } else {
+            Debug.Log("No potential one-sided connections found");
         }
         
         Debug.Log($"Final results: {cells.Count} cells with {bonds.Count} adhesion bonds");
@@ -983,8 +927,69 @@ public class AdhesionConnections
 
     #region Bond Tracking
 
-    // Dictionary to track bond types by unique ID pairs
-    private static Dictionary<(int, int), Bond.BondType> _bondTypesByUniqueIdPair = new Dictionary<(int, int), Bond.BondType>();
+    /// <summary>
+    /// Checks if the connection between two cells is occluded by a sibling that is closer
+    /// </summary>
+    private static bool IsOccludedByAnyCloserSibling(
+        int cellA,
+        int cellB,
+        Dictionary<int, Cell> cells,
+        Dictionary<int, List<int>> parentToChildren,
+        ParticleIDData[] particleIDs,
+        float distanceAB)
+    {
+        // Get the parent IDs of both cells
+        int parentA = particleIDs[cellA].parentID;
+        int parentB = particleIDs[cellB].parentID;
+        
+        // Check if cellA has siblings
+        if (parentToChildren.TryGetValue(parentA, out List<int> siblingsOfA))
+        {
+            // Check if any sibling of A is closer to B than A is
+            foreach (int siblingID in siblingsOfA)
+            {
+                // Skip if checking the cell itselw
+                if (siblingID == cellA)
+                    continue;
+                    
+                // Calculate distance between the sibling and cellB
+                float distanceSiblingToB = Vector3.Distance(cells[siblingID].Position, cells[cellB].Position);
+                
+                // If a sibling is closer to B than A is, then the connection is occluded
+                if (distanceSiblingToB < distanceAB)
+                {
+                    return true;
+                }
+            }
+        }
+        
+        // Check if cellB has siblings
+        if (parentToChildren.TryGetValue(parentB, out List<int> siblingsOfB))
+        {
+            // Check if any sibling of B is closer to A than B is
+            foreach (int siblingID in siblingsOfB)
+            {
+                // Skip if checking the cell itself
+                if (siblingID == cellB)
+                    continue;
+                    
+                // Calculate distance between the sibling and cellA
+                float distanceSiblingToA = Vector3.Distance(cells[siblingID].Position, cells[cellA].Position);
+                
+                // If a sibling is closer to A than B is, then the connection is occluded
+                if (distanceSiblingToA < distanceAB)
+                {
+                    return true;
+                }
+            }
+        }
+        
+        // If no closer siblings were found, the connection is not occluded
+        return false;
+    }
+
+    // Static dictionary to track bonds using uniqueIDs instead of indices
+    private static Dictionary<int, List<int>> _currentBondsByUniqueId;
 
     /// <summary>
     /// Function to expose the current bonds to the controller
@@ -1043,8 +1048,8 @@ public class AdhesionConnections
         Debug.Log($"Set {_currentBondsByUniqueId.Count} cells with connections in the bond tracking system");
     }
     
-    // Static dictionary to track bonds using uniqueIDs instead of indices
-    private static Dictionary<int, List<int>> _currentBondsByUniqueId;
+    // Dictionary to track bond types by unique ID pairs
+    private static Dictionary<(int, int), Bond.BondType> _bondTypesByUniqueIdPair = new Dictionary<(int, int), Bond.BondType>();
 
     /// <summary>
     /// Clears all static data to ensure clean state between simulation runs
