@@ -46,6 +46,12 @@ public class ParticleSystemController : MonoBehaviour
     public float labelScale = 0.5f;
     public Color labelColor = Color.white;
     
+    [Header("Split Plane Ring Visualization")]
+    public bool showSplitPlaneRings = false;
+    public float splitPlaneRingRadius = 2.0f;
+    public int splitPlaneRingSegments = 48;
+    public Color splitPlaneRingColor = Color.cyan;
+    
     #endregion
 
     #region Private Fields
@@ -101,6 +107,12 @@ public class ParticleSystemController : MonoBehaviour
     
     // Array to store formatted IDs for each particle
     private ParticleIDData[] particleIDs;
+
+    // Array to hold split plane ring renderers
+    private LineRenderer[] splitPlaneRings;
+    
+    // Add a field to track the most recently dragged/selected cell
+    private int lastSelectedParticleID = -1;
     
     #endregion
 
@@ -164,9 +176,15 @@ public class ParticleSystemController : MonoBehaviour
         }
     }
       
-    // Struct that matches the GenomeColorData in the shader
+    // Struct that matches the GenomeAdhesionData in the shader (fields up to colorPacked)
     private struct GenomeColorData
     {
+        public int parentMakeAdhesion;
+        public int childA_KeepAdhesion;
+        public int childB_KeepAdhesion;
+        public float adhesionRestLength;
+        public float adhesionSpringStiffness;
+        public float adhesionSpringDamping;
         public uint colorPacked;
         public float orientConstraintStrength;
         public float maxAngleDeviation;
@@ -208,6 +226,8 @@ public class ParticleSystemController : MonoBehaviour
         
         // Initialize particle labels
         InitializeParticleLabels();
+        // Initialize split plane rings
+        InitializeSplitPlaneRings();
     }    // SimulateAdhesionConnections method has been removed as part of bond removal
 
     void Update()
@@ -288,6 +308,7 @@ public class ParticleSystemController : MonoBehaviour
             new Bounds(Vector3.zero, Vector3.one * spawnRadius * 2f),
             drawArgsBufferSpheres);        UpdateDragVisualization();
         UpdateParticleLabels();  // refresh labels
+        UpdateSplitPlaneRings(); // update split plane rings
     }    // UpdateAdhesionConnectionsVisual method has been removed as part of bond removal
 
     #endregion
@@ -504,6 +525,38 @@ public class ParticleSystemController : MonoBehaviour
             }
         }
     }
+
+    private void InitializeSplitPlaneRings()
+    {
+        if (splitPlaneRings == null || splitPlaneRings.Length != particleCount)
+        {
+            // Clean up old rings
+            if (splitPlaneRings != null)
+            {
+                foreach (var ring in splitPlaneRings)
+                {
+                    if (ring != null) Destroy(ring.gameObject);
+                }
+            }
+            splitPlaneRings = new LineRenderer[particleCount];
+            GameObject ringsParent = new GameObject("SplitPlaneRings");
+            ringsParent.transform.SetParent(transform);
+            for (int i = 0; i < activeParticleCount; i++)
+            {
+                GameObject ringObj = new GameObject($"SplitPlaneRing_{i}");
+                ringObj.transform.SetParent(ringsParent.transform);
+                var lr = ringObj.AddComponent<LineRenderer>();
+                lr.positionCount = splitPlaneRingSegments + 1;
+                lr.loop = true;
+                lr.startWidth = 0.03f;
+                lr.endWidth = 0.03f;
+                lr.material = new Material(Shader.Find("Sprites/Default"));
+                lr.material.color = splitPlaneRingColor;
+                lr.enabled = false;
+                splitPlaneRings[i] = lr;
+            }
+        }
+    }
     
     #endregion
 
@@ -611,55 +664,38 @@ public class ParticleSystemController : MonoBehaviour
     {
         if (genome == null || genome.modes.Count == 0 || parentIndex >= activeParticleCount)
             return;
-            
         Vector3 parentPos = cpuParticlePositions[parentIndex];
         Quaternion parentRot = cpuParticleRotations[parentIndex];
-        
         Particle[] particleData = new Particle[1];
         particleBuffer.GetData(particleData, 0, parentIndex, 1);
         int parentModeIndex = particleData[0].modeIndex;
-        
         if (parentModeIndex < 0 || parentModeIndex >= genome.modes.Count) {
             parentModeIndex = GetInitialModeIndex();
         }
-        
         GenomeMode mode = genome.modes[parentModeIndex];
-        
         int childAModeIndex = mode.childAModeIndex;
         if (childAModeIndex < 0 || childAModeIndex >= genome.modes.Count)
             childAModeIndex = parentModeIndex;
-            
         int childBModeIndex = mode.childBModeIndex;
         if (childBModeIndex < 0 || childBModeIndex >= genome.modes.Count)
             childBModeIndex = parentModeIndex;
-        
         Vector3 forward = parentRot * Vector3.forward;
         Vector3 up = parentRot * Vector3.up;
         Vector3 right = parentRot * Vector3.right;
-        
         Vector3 splitDirLocal = GetDirection(mode.parentSplitYaw, mode.parentSplitPitch);
-        
         Vector3 splitDirWorld = right * splitDirLocal.x + up * splitDirLocal.y + forward * splitDirLocal.z;
-        
         Vector3 posA = parentPos + splitDirWorld * spawnOverlapOffset;
         Vector3 posB = parentPos - splitDirWorld * spawnOverlapOffset;
-        
         Vector3 childADirLocal = GetDirection(mode.childA_OrientationYaw, mode.childA_OrientationPitch);
         Vector3 childADirWorld = right * childADirLocal.x + up * childADirLocal.y + forward * childADirLocal.z;
         Quaternion rotA = Quaternion.LookRotation(childADirWorld, up);
-        
         Vector3 childBDirLocal = GetDirection(mode.childB_OrientationYaw, mode.childB_OrientationPitch);
         Vector3 childBDirWorld = right * childBDirLocal.x + up * childBDirLocal.y + forward * childBDirLocal.z;
         Quaternion rotB = Quaternion.LookRotation(childBDirWorld, up);
-        
         Vector3 parentVelocity = Vector3.zero;
-        
         Vector3 velA = parentVelocity + splitDirWorld * splitVelocityMagnitude;
         Vector3 velB = parentVelocity - splitDirWorld * splitVelocityMagnitude;
-
-        // Extract the parent's unique ID for the children to reference
         int parentUniqueID = particleIDs[parentIndex].uniqueID;
-
         CellSplitData splitData = new CellSplitData
         {
             parentIndex = parentIndex,
@@ -672,7 +708,6 @@ public class ParticleSystemController : MonoBehaviour
             childAModeIndex = childAModeIndex,
             childBModeIndex = childBModeIndex
         };
-        
         pendingSplits.Add(splitData);
     }
     
@@ -683,17 +718,14 @@ public class ParticleSystemController : MonoBehaviour
 
         // Calculate how many new particles we'll need (only +1 per split since we're reusing parent's slot)
         int neededNewParticles = pendingSplits.Count;
-        
         // Check if there's enough room for the new particles
         if (activeParticleCount + neededNewParticles > particleCount)
         {
-            // Calculate new size with growth factor to avoid frequent resizing
             int newCapacity = Mathf.Max(activeParticleCount + neededNewParticles, particleCount * 2);
             ResizeParticleBuffers(newCapacity);
         }
-
         Particle[] particleData = new Particle[particleCount];
-        particleBuffer.GetData(particleData);        // Ensure particleIDs array is initialized and large enough
+        particleBuffer.GetData(particleData);
         if (particleIDs == null || particleIDs.Length < particleCount)
         {
             ParticleIDData[] newParticleIDs = new ParticleIDData[particleCount];
@@ -702,7 +734,6 @@ public class ParticleSystemController : MonoBehaviour
                 System.Array.Copy(particleIDs, newParticleIDs, System.Math.Min(particleIDs.Length, particleCount));
             }
             particleIDs = newParticleIDs;
-            // Ensure first particle has valid ID if it wasn't set previously
             if (activeParticleCount > 0 && particleIDs[0].childType == '\0')
             {
                 particleIDs[0].parentID = 0;
@@ -710,7 +741,24 @@ public class ParticleSystemController : MonoBehaviour
                 particleIDs[0].childType = 'A';
             }
         }
-
+        // Ensure splitPlaneRings array is large enough
+        if (splitPlaneRings == null || splitPlaneRings.Length < particleCount)
+        {
+            LineRenderer[] newRings = new LineRenderer[particleCount];
+            if (splitPlaneRings != null)
+            {
+                System.Array.Copy(splitPlaneRings, newRings, System.Math.Min(splitPlaneRings.Length, particleCount));
+            }
+            splitPlaneRings = newRings;
+        }
+        // Find or create the rings parent object
+        Transform ringsParent = transform.Find("SplitPlaneRings");
+        if (ringsParent == null)
+        {
+            GameObject ringsParentObj = new GameObject("SplitPlaneRings");
+            ringsParentObj.transform.SetParent(transform);
+            ringsParent = ringsParentObj.transform;
+        }
         // Keep track of newly created particles so we can create labels for them later
         List<int> newParticleIndices = new List<int>();
         List<string> newParticleIds = new List<string>();
@@ -782,6 +830,36 @@ public class ParticleSystemController : MonoBehaviour
             newParticleIndices.Add(childBIndex);
             newParticleIds.Add(particleIDs[childBIndex].GetFormattedID());
             
+            // Ensure split rings exist for both children
+            if (splitPlaneRings[childAIndex] == null)
+            {
+                GameObject ringObj = new GameObject($"SplitPlaneRing_{childAIndex}");
+                ringObj.transform.SetParent(ringsParent);
+                var lr = ringObj.AddComponent<LineRenderer>();
+                lr.positionCount = splitPlaneRingSegments + 1;
+                lr.loop = true;
+                lr.startWidth = 0.03f;
+                lr.endWidth = 0.03f;
+                lr.material = new Material(Shader.Find("Sprites/Default"));
+                lr.material.color = splitPlaneRingColor;
+                lr.enabled = false;
+                splitPlaneRings[childAIndex] = lr;
+            }
+            if (splitPlaneRings[childBIndex] == null)
+            {
+                GameObject ringObj = new GameObject($"SplitPlaneRing_{childBIndex}");
+                ringObj.transform.SetParent(ringsParent);
+                var lr = ringObj.AddComponent<LineRenderer>();
+                lr.positionCount = splitPlaneRingSegments + 1;
+                lr.loop = true;
+                lr.startWidth = 0.03f;
+                lr.endWidth = 0.03f;
+                lr.material = new Material(Shader.Find("Sprites/Default"));
+                lr.material.color = splitPlaneRingColor;
+                lr.enabled = false;
+                splitPlaneRings[childBIndex] = lr;
+            }
+            
             // Increment active count by only 1 since we're reusing the parent's slot
             activeParticleCount += 1;
         }
@@ -814,8 +892,7 @@ public class ParticleSystemController : MonoBehaviour
             Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
             float closestDist = Mathf.Infinity;
             int closestID = -1;
-            
-            for (int i = 0; i < cpuParticlePositions.Length; i++)
+            for (int i = 0; i < activeParticleCount; i++) // Only check active particles
             {
                 Vector3 center = cpuParticlePositions[i];
                 float r = maxRadius;
@@ -824,7 +901,6 @@ public class ParticleSystemController : MonoBehaviour
                 float b = 2.0f * Vector3.Dot(oc, ray.direction);
                 float c = Vector3.Dot(oc, oc) - r * r;
                 float discriminant = b * b - 4.0f * a * c;
-
                 if (discriminant > 0)
                 {
                     float t = (-b - Mathf.Sqrt(discriminant)) / (2.0f * a);
@@ -835,13 +911,18 @@ public class ParticleSystemController : MonoBehaviour
                     }
                 }
             }
-
             if (closestID != -1)
             {
                 selectedParticleID = closestID;
+                lastSelectedParticleID = closestID;
                 dragTargetWorld = cpuParticlePositions[selectedParticleID];
-                
                 currentDragDistance = Vector3.Distance(Camera.main.transform.position, dragTargetWorld);
+                // Display additional info in the console
+                string idText = (particleIDs != null && selectedParticleID < particleIDs.Length) ? particleIDs[selectedParticleID].GetFormattedID() : selectedParticleID.ToString();
+                string modeText = (cachedParticleData != null && selectedParticleID < cachedParticleData.Length) ? $"Mode: {cachedParticleData[selectedParticleID].modeIndex}" : "Mode: N/A";
+                Vector3 pos = cpuParticlePositions[selectedParticleID];
+                Debug.Log($"Selected Particle: {idText}, Index: {selectedParticleID}, {modeText}, Position: {pos}");
+                UpdateSplitPlaneRings(); // Ensure split ring updates immediately
             }
         }
 
@@ -894,8 +975,54 @@ public class ParticleSystemController : MonoBehaviour
         }
     }
     
-    #endregion
+    private void UpdateSplitPlaneRings()
+    {
+        if (!showSplitPlaneRings || splitPlaneRings == null)
+        {
+            if (splitPlaneRings != null)
+                foreach (var ring in splitPlaneRings) if (ring != null) ring.enabled = false;
+            return;
+        }
+        if (Camera.main == null) return;
+        // Only render the split ring for the last selected cell
+        for (int i = 0; i < splitPlaneRings.Length; i++)
+        {
+            if (splitPlaneRings[i] != null) splitPlaneRings[i].enabled = false;
+        }
+        if (lastSelectedParticleID >= 0 && lastSelectedParticleID < activeParticleCount && splitPlaneRings[lastSelectedParticleID] != null)
+        {
+            int i = lastSelectedParticleID;
+            var lr = splitPlaneRings[i];
+            Vector3 center = cpuParticlePositions[i];
+            Quaternion rot = cpuParticleRotations[i];
+            Vector3 normal = rot * Vector3.up; // fallback
+            if (cachedParticleData != null && i < cachedParticleData.Length && genome != null && cachedParticleData[i].modeIndex >= 0 && cachedParticleData[i].modeIndex < genome.modes.Count)
+            {
+                var mode = genome.modes[cachedParticleData[i].modeIndex];
+                Vector3 splitDirLocal = GetDirection(mode.parentSplitYaw, mode.parentSplitPitch);
+                Vector3 right = rot * Vector3.right;
+                Vector3 up = rot * Vector3.up;
+                Vector3 forward = rot * Vector3.forward;
+                Vector3 splitDirWorld = right * splitDirLocal.x + up * splitDirLocal.y + forward * splitDirLocal.z;
+                normal = splitDirWorld;
+            }
+            Vector3[] points = new Vector3[splitPlaneRingSegments + 1];
+            Quaternion ringRot = Quaternion.FromToRotation(Vector3.up, normal);
+            for (int j = 0; j <= splitPlaneRingSegments; j++)
+            {
+                float angle = Mathf.Deg2Rad * (j * 360f / splitPlaneRingSegments);
+                Vector3 localPos = new Vector3(Mathf.Cos(angle) * splitPlaneRingRadius, 0, Mathf.Sin(angle) * splitPlaneRingRadius);
+                points[j] = center + ringRot * localPos;
+            }
+            lr.SetPositions(points);
+            lr.startColor = splitPlaneRingColor;
+            lr.endColor = splitPlaneRingColor;
+            lr.enabled = true;
+        }
+    }
 
+    #endregion
+    
     #region GPU Data Management
     
     private void RequestParticleDataAsync()
@@ -1002,6 +1129,8 @@ public class ParticleSystemController : MonoBehaviour
         
         // Reinitialize particle labels with new count
         InitializeParticleLabels();
+        // Reinitialize split plane rings with new count
+        InitializeSplitPlaneRings();
     }
 
     private void UpdateGenomeModesBuffer()
@@ -1019,38 +1148,30 @@ public class ParticleSystemController : MonoBehaviour
             genomeModesBuffer = null;
         }
 
-        // Create a new buffer with the current number of genome modes
         int modeCount = genome.modes.Count;
-        genomeModesBuffer = new ComputeBuffer(modeCount, 3 * 4); // 3 fields * 4 bytes each
+        genomeModesBuffer = new ComputeBuffer(modeCount, System.Runtime.InteropServices.Marshal.SizeOf(typeof(GenomeColorData)));
 
-        // Create and populate the data array
         GenomeColorData[] modeData = new GenomeColorData[modeCount];
-
         for (int i = 0; i < modeCount; i++)
         {
             GenomeMode mode = genome.modes[i];
-            
-            // Pack the color into a uint using our utility method
             uint colorPacked = PackColorToUint(mode.modeColor);
-            
             modeData[i] = new GenomeColorData
             {
+                parentMakeAdhesion = 0, // Set as needed
+                childA_KeepAdhesion = 0, // Set as needed
+                childB_KeepAdhesion = 0, // Set as needed
+                adhesionRestLength = 0f, // Set as needed
+                adhesionSpringStiffness = 0f, // Set as needed
+                adhesionSpringDamping = 0f, // Set as needed
                 colorPacked = colorPacked,
                 orientConstraintStrength = mode.orientationConstraintStrength,
                 maxAngleDeviation = mode.maxAllowedAngleDeviation
             };
-            
-            Debug.Log($"Mode {i} ({mode.modeName}): Packed color 0x{colorPacked:X6} from {mode.modeColor}");
         }
-        
-        // Set the data to the buffer
         genomeModesBuffer.SetData(modeData);
-        
-        // Set buffer and default mode index in the shader material
         sphereMaterial.SetBuffer("genomeModesBuffer", genomeModesBuffer);
         sphereMaterial.SetInt("defaultGenomeMode", GetInitialModeIndex());
-        
-        Debug.Log($"Updated genome modes buffer with {modeCount} modes");
     }
     
     // Utility function to pack a Color into a uint
