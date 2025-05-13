@@ -52,6 +52,9 @@ public class ParticleSystemController : MonoBehaviour
     public int splitPlaneRingSegments = 48;
     public Color splitPlaneRingColor = Color.cyan;
     
+    [Header("Adhesion Visualization")]
+    public CellAdhesionManager adhesionManager;
+    
     #endregion
 
     #region Private Fields
@@ -79,7 +82,8 @@ public class ParticleSystemController : MonoBehaviour
 
     int selectedParticleID = -1;
     Vector3 dragTargetWorld;
-    Vector3[] cpuParticlePositions;
+    private Vector3[] cpuParticlePositions;
+    public Vector3[] CpuParticlePositions => cpuParticlePositions;
     Quaternion[] cpuParticleRotations;
 
     private float currentDragDistance;
@@ -107,12 +111,14 @@ public class ParticleSystemController : MonoBehaviour
     
     // Array to store formatted IDs for each particle
     private ParticleIDData[] particleIDs;
+    public ParticleIDData[] ParticleIDs => particleIDs;
 
     // Array to hold split plane ring renderers
     private LineRenderer[] splitPlaneRings;
     
     // Add a field to track the most recently dragged/selected cell
     private int lastSelectedParticleID = -1;
+    public int LastSelectedParticleID => lastSelectedParticleID;
     
     #endregion
 
@@ -859,6 +865,31 @@ public class ParticleSystemController : MonoBehaviour
                 lr.enabled = false;
                 splitPlaneRings[childBIndex] = lr;
             }
+            
+            // --- ADHESION SYSTEM INTEGRATION ---
+            if (adhesionManager != null && genome != null)
+            {
+                // Get parent mode for split parameters
+                int parentModeIndex = particleData[parentIndex].modeIndex;
+                if (parentModeIndex < 0 || parentModeIndex >= genome.modes.Count)
+                    parentModeIndex = 0;
+                var mode = genome.modes[parentModeIndex];
+                adhesionManager.HandleCellSplit(
+                    parentIndex,
+                    childAIndex,
+                    childBIndex,
+                    mode.parentSplitYaw,
+                    mode.parentSplitPitch,
+                    cpuParticleRotations[parentIndex],
+                    cpuParticlePositions[parentIndex],
+                    split.childAModeIndex,
+                    split.childBModeIndex,
+                    mode.parentMakeAdhesion,
+                    mode.childA_KeepAdhesion,
+                    mode.childB_KeepAdhesion
+                );
+            }
+            // --- END ADHESION SYSTEM INTEGRATION ---
             
             // Increment active count by only 1 since we're reusing the parent's slot
             activeParticleCount += 1;
