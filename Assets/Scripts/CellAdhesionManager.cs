@@ -6,7 +6,6 @@ public class CellAdhesionManager : MonoBehaviour
     public ParticleSystemController particleSystemController;
     public Material bondMaterial;
     public float bondWidth = 0.05f;
-    public Color defaultBondColor = new Color(1.0f, 0.7f, 0.8f, 1.0f); // Light pink
     public Color zoneAColor = Color.green;
     public Color zoneBColor = Color.blue;
     public Color inheritanceZoneColor = Color.red;
@@ -19,7 +18,8 @@ public class CellAdhesionManager : MonoBehaviour
     {
         public int cellA;
         public int cellB;
-        public BondZone zone;
+        public BondZone zoneA; // zone for cellA's end
+        public BondZone zoneB; // zone for cellB's end
         public bool isInherited;
         public bool keepA;
         public bool keepB;
@@ -49,14 +49,15 @@ public class CellAdhesionManager : MonoBehaviour
         UpdateBondVisuals();
     }
 
-    public void AddBond(int cellA, int cellB, BondZone zone, bool isInherited, bool keepA, bool keepB, bool makeAdhesion)
+    public void AddBond(int cellA, int cellB, BondZone zoneA, BondZone zoneB, bool isInherited, bool keepA, bool keepB, bool makeAdhesion)
     {
-        Debug.Log($"AddBond called: {cellA} <-> {cellB}, zone={zone}, isInherited={isInherited}, keepA={keepA}, keepB={keepB}, makeAdhesion={makeAdhesion}");
+        Debug.Log($"AddBond called: {cellA} <-> {cellB}, zoneA={zoneA}, zoneB={zoneB}, isInherited={isInherited}, keepA={keepA}, keepB={keepB}, makeAdhesion={makeAdhesion}");
         bonds.Add(new AdhesionBond
         {
             cellA = cellA,
             cellB = cellB,
-            zone = zone,
+            zoneA = zoneA,
+            zoneB = zoneB,
             isInherited = isInherited,
             keepA = keepA,
             keepB = keepB,
@@ -72,9 +73,7 @@ public class CellAdhesionManager : MonoBehaviour
             if (lr != null) Destroy(lr.gameObject);
         }
         bondLines.Clear();
-    }
-
-    private void UpdateBondVisuals()
+    }    private void UpdateBondVisuals()
     {
         Debug.Log($"UpdateBondVisuals called. Bonds count: {bonds.Count}");
         if (particleSystemController == null)
@@ -82,62 +81,86 @@ public class CellAdhesionManager : MonoBehaviour
             Debug.LogError("[CellAdhesionManager] particleSystemController is null. Bonds cannot be visualized.");
             return;
         }
-        // Clean up old lines
+        UpdateBondZones();
         foreach (var lr in bondLines)
         {
             if (lr != null) Destroy(lr.gameObject);
         }
         bondLines.Clear();
-
         var positions = particleSystemController.CpuParticlePositions;
-        int selected = particleSystemController.LastSelectedParticleID;
-
         foreach (var bond in bonds)
         {
             if (bond.cellA < 0 || bond.cellB < 0 || bond.cellA >= positions.Length || bond.cellB >= positions.Length)
                 continue;
-            var go = new GameObject($"Bond_{bond.cellA}_{bond.cellB}");
-            var lr = go.AddComponent<LineRenderer>();
-            lr.positionCount = 2;
-            lr.SetPosition(0, positions[bond.cellA]);
-            lr.SetPosition(1, positions[bond.cellB]);
-            lr.startWidth = bondWidth;
-            lr.endWidth = bondWidth;
-            lr.material = bondMaterial != null ? bondMaterial : new Material(Shader.Find("Sprites/Default"));
-            Color color = defaultBondColor;
-            if (selected == bond.cellA || selected == bond.cellB)
-            {
-                switch (bond.zone)
-                {
-                    case BondZone.ZoneA: color = zoneAColor; break;
-                    case BondZone.ZoneB: color = zoneBColor; break;
-                    case BondZone.Inheritance: color = inheritanceZoneColor; break;
-                }
-            }
-            lr.startColor = color;
-            lr.endColor = color;
-            bondLines.Add(lr);
+                
+            // Get the cell positions
+            Vector3 posA = positions[bond.cellA];
+            Vector3 posB = positions[bond.cellB];
+            
+            // Calculate the midpoint between the two cells
+            Vector3 midpoint = (posA + posB) * 0.5f;
+            
+            // Get colors for each end based on zone
+            Color colorA = bond.zoneA == BondZone.ZoneA ? zoneAColor : bond.zoneA == BondZone.ZoneB ? zoneBColor : inheritanceZoneColor;
+            Color colorB = bond.zoneB == BondZone.ZoneA ? zoneAColor : bond.zoneB == BondZone.ZoneB ? zoneBColor : inheritanceZoneColor;
+            
+            // Create line from cellA to midpoint
+            var goA = new GameObject($"Bond_{bond.cellA}_to_mid");
+            var lrA = goA.AddComponent<LineRenderer>();
+            lrA.positionCount = 2;
+            lrA.SetPosition(0, posA);
+            lrA.SetPosition(1, midpoint);
+            lrA.startWidth = bondWidth;
+            lrA.endWidth = bondWidth;
+            lrA.material = bondMaterial != null ? bondMaterial : new Material(Shader.Find("Sprites/Default"));
+            lrA.startColor = colorA;
+            lrA.endColor = colorA;  // Same color for start and end to avoid blending
+            bondLines.Add(lrA);
+            
+            // Create line from midpoint to cellB
+            var goB = new GameObject($"Bond_mid_to_{bond.cellB}");
+            var lrB = goB.AddComponent<LineRenderer>();
+            lrB.positionCount = 2;
+            lrB.SetPosition(0, midpoint);
+            lrB.SetPosition(1, posB);
+            lrB.startWidth = bondWidth;
+            lrB.endWidth = bondWidth;
+            lrB.material = bondMaterial != null ? bondMaterial : new Material(Shader.Find("Sprites/Default"));
+            lrB.startColor = colorB;
+            lrB.endColor = colorB;  // Same color for start and end to avoid blending
+            bondLines.Add(lrB);
         }
-    }
-
-    // Utility: Classify the zone between two cells
-    public BondZone ClassifyZone(Vector3 parentPos, Quaternion parentRot, Vector3 otherPos, float splitYaw, float splitPitch)
+    }    // Updated to define inheritance zone as a trench around the split equator
+    public BondZone ClassifyBondDirection(Vector3 cellPos, Quaternion cellRot, Vector3 otherPos, float splitYaw, float splitPitch, float inheritanceAngleDeg = 10f)
     {
-        // Calculate split plane normal
-        Vector3 forward = parentRot * Vector3.forward;
-        Vector3 up = parentRot * Vector3.up;
-        Vector3 right = parentRot * Vector3.right;
-        Vector3 splitDirLocal = Quaternion.Euler(splitPitch, splitYaw, 0f) * Vector3.forward;
-        Vector3 splitNormal = right * splitDirLocal.x + up * splitDirLocal.y + forward * splitDirLocal.z;
-        splitNormal.Normalize();
-        // Vector from parent to other
-        Vector3 toOther = (otherPos - parentPos).normalized;
-        float dot = Vector3.Dot(toOther, splitNormal);
+        // Calculate the bond direction in local coordinates relative to the cell
+        Vector3 bondDirWorld = (otherPos - cellPos).normalized;
+        Vector3 bondDirLocal = Quaternion.Inverse(cellRot) * bondDirWorld; // Transform bond direction to local space
+
+        // Use the cell's forward vector as the reference direction
+        Vector3 forwardLocal = Vector3.forward; // In local space, forward is always (0, 0, 1)
+
+        // Calculate the split direction in local coordinates
+        Vector3 splitDirLocal = Quaternion.Euler(splitPitch, splitYaw, 0f) * forwardLocal;
+
+        // Calculate dot product to determine zone A or B
+        float dot = Vector3.Dot(bondDirLocal, splitDirLocal);
+        
+        // Calculate the angle between the bond direction and the split direction
         float angle = Mathf.Acos(Mathf.Clamp(dot, -1f, 1f)) * Mathf.Rad2Deg;
-        // Inheritance zone: within 10 degrees of the split plane
-        if (Mathf.Abs(angle - 90f) <= 10f) return BondZone.Inheritance;
-        // ZoneA: one hemisphere, ZoneB: the other
-        return (dot > 0) ? BondZone.ZoneA : BondZone.ZoneB;
+        
+        // Determine if the bond is near the equator (90 degrees from split direction)
+        // The inheritance zone is now defined as angle between (90-halfWidth) and (90+halfWidth)
+        float halfWidth = inheritanceAngleDeg * 0.5f;
+        float equatorialAngle = 90f;
+        
+        // Check if bond is in the equatorial trench
+        if (Mathf.Abs(angle - equatorialAngle) <= halfWidth)
+            return BondZone.Inheritance;
+        else if (dot > 0)
+            return BondZone.ZoneB;
+        else
+            return BondZone.ZoneA;
     }
 
     // Call this when a cell splits to update bonds
@@ -146,27 +169,32 @@ public class CellAdhesionManager : MonoBehaviour
         Debug.Log($"HandleCellSplit: parentIdx={parentIdx}, childAIdx={childAIdx}, childBIdx={childBIdx}, splitYaw={splitYaw}, splitPitch={splitPitch}, makeAdhesion={makeAdhesion}, keepA={keepA}, keepB={keepB}");
         // Remove and process all bonds involving the parent
         for (int i = bonds.Count - 1; i >= 0; i--)
-        {
-            var bond = bonds[i];
+        {            var bond = bonds[i];
             bool involvesParent = (bond.cellA == parentIdx || bond.cellB == parentIdx);
             if (!involvesParent) continue;
+            
             int other = (bond.cellA == parentIdx) ? bond.cellB : bond.cellA;
-            BondZone zone = ClassifyZone(parentPos, parentRot, particleSystemController.CpuParticlePositions[other], splitYaw, splitPitch);
-            // Inheritance zone: duplicate to both children if both keep, else to one child if only one keeps
-            if (zone == BondZone.Inheritance)
+            Vector3 otherPos = particleSystemController.CpuParticlePositions[other];
+              Debug.Log($"[Adhesion] Processing bond between parent {parentIdx} and {other}");
+            Debug.Log($"[Adhesion] Split params: yaw={splitYaw}, pitch={splitPitch}, parent pos={parentPos}, other pos={otherPos}");
+            Debug.Log($"[Adhesion] Parent rotation: {parentRot}");
+            
+            // Double check that we're processing the right parameters
+            BondZone zoneA = ClassifyBondDirection(parentPos, parentRot, otherPos, splitYaw, splitPitch);
+            BondZone zoneB = ClassifyBondDirection(otherPos, Quaternion.identity, parentPos, 0, 0); // For other, no split
+            
+            Debug.Log($"[Adhesion] Classified as zoneA: {zoneA}, zoneB: {zoneB}");
+            
+            // Assign to childA or childB based on zoneA
+            if (zoneA == BondZone.ZoneA && keepA)
+                AddBond(childAIdx, other, zoneA, zoneB, true, keepA, keepB, makeAdhesion);
+            else if (zoneA == BondZone.ZoneB && keepB)
+                AddBond(childBIdx, other, zoneA, zoneB, true, keepA, keepB, makeAdhesion);
+            else if (zoneA == BondZone.Inheritance)
             {
-                if (keepA) AddBond(childAIdx, other, zone, true, keepA, keepB, makeAdhesion);
-                if (keepB) AddBond(childBIdx, other, zone, true, keepA, keepB, makeAdhesion);
-            }
-            // ZoneA: assign to childA if keepA
-            else if (zone == BondZone.ZoneA)
-            {
-                if (keepA) AddBond(childAIdx, other, zone, true, keepA, keepB, makeAdhesion);
-            }
-            // ZoneB: assign to childB if keepB
-            else if (zone == BondZone.ZoneB)
-            {
-                if (keepB) AddBond(childBIdx, other, zone, true, keepA, keepB, makeAdhesion);
+                // Inheritance: assign to both children if desired
+                if (keepA) AddBond(childAIdx, other, zoneA, zoneB, true, keepA, keepB, makeAdhesion);
+                if (keepB) AddBond(childBIdx, other, zoneA, zoneB, true, keepA, keepB, makeAdhesion);
             }
             // Remove the old bond
             bonds.RemoveAt(i);
@@ -198,11 +226,27 @@ public class CellAdhesionManager : MonoBehaviour
                 for (int j = i + 1; j < siblings.Count; j++)
                 {
                     bool exists = bonds.Exists(b => (b.cellA == siblings[i] && b.cellB == siblings[j]) || (b.cellA == siblings[j] && b.cellB == siblings[i]));
-                    Debug.Log($"[Adhesion] Checking bond between {siblings[i]} and {siblings[j]}: exists={exists}");
-                    if (!exists)
+                    Debug.Log($"[Adhesion] Checking bond between {siblings[i]} and {siblings[j]}: exists={exists}");                    if (!exists)
                     {
                         Debug.Log($"[Adhesion] Creating sibling bond: {siblings[i]} <-> {siblings[j]}");
-                        AddBond(siblings[i], siblings[j], BondZone.Inheritance, false, keepA, keepB, true);
+                          // Use positions and a default orientation for classification
+                        Vector3 posI = particleSystemController.CpuParticlePositions[siblings[i]];
+                        Vector3 posJ = particleSystemController.CpuParticlePositions[siblings[j]];
+                        
+                        // Create a sensible orientation for classification
+                        // Using a rotation looking from sibling i to sibling j
+                        Vector3 dirItoJ = (posJ - posI).normalized;
+                        Quaternion lookRotation = Quaternion.LookRotation(dirItoJ);
+                        
+                        Debug.Log($"[Adhesion Debug] Sibling bond classification - posI={posI}, posJ={posJ}, dirItoJ={dirItoJ}");
+                        Debug.Log($"[Adhesion Debug] lookRotation={lookRotation}, splitYaw={splitYaw}, splitPitch={splitPitch}");
+                        
+                        // Use appropriate parameters to classify
+                        BondZone zoneI = ClassifyBondDirection(posI, lookRotation, posJ, splitYaw, splitPitch);
+                        BondZone zoneJ = ClassifyBondDirection(posJ, lookRotation, posI, splitYaw, splitPitch);
+                        
+                        Debug.Log($"[Adhesion] Classified sibling bond: {siblings[i]} <-> {siblings[j]} as zoneI={zoneI}, zoneJ={zoneJ}");
+                        AddBond(siblings[i], siblings[j], zoneI, zoneJ, false, keepA, keepB, true);
                     }
                 }
             }
@@ -222,16 +266,62 @@ public class CellAdhesionManager : MonoBehaviour
         for (int i = 0; i < siblings.Count; i++)
         {
             for (int j = i + 1; j < siblings.Count; j++)
-            {
-                bool exists = bonds.Exists(b => (b.cellA == siblings[i] && b.cellB == siblings[j]) || (b.cellA == siblings[j] && b.cellB == siblings[i]));
+            {                bool exists = bonds.Exists(b => (b.cellA == siblings[i] && b.cellB == siblings[j]) || (b.cellA == siblings[j] && b.cellB == siblings[i]));
                 if (!exists)
                 {
-                    AddBond(siblings[i], siblings[j], BondZone.Inheritance, false, keepA, keepB, true);
+                    // For initial bonds, randomly assign zone since we don't have a split direction
+                    BondZone randomZoneA = Random.value > 0.5f ? BondZone.ZoneA : BondZone.ZoneB;
+                    BondZone randomZoneB = Random.value > 0.5f ? BondZone.ZoneA : BondZone.ZoneB;
+                    Debug.Log($"[Adhesion] Creating initial bond: {siblings[i]} <-> {siblings[j]} as zoneA={randomZoneA}, zoneB={randomZoneB}");
+                    AddBond(siblings[i], siblings[j], randomZoneA, randomZoneB, false, keepA, keepB, true);
                 }
             }
         }
-    }
+    }    private void UpdateBondZones()
+    {
+        if (particleSystemController == null || particleSystemController.ParticleIDs == null || particleSystemController.genome == null)
+            return;
 
-    // TODO: Add logic for bond inheritance, duplication, and dropping during cell division
-    // and for zone classification based on split plane and direction between cells.
+        var genome = particleSystemController.genome;
+        var particleIDs = particleSystemController.ParticleIDs;
+        var positions = particleSystemController.CpuParticlePositions;
+        // Try to get cached mode indices if available
+        System.Func<int, int> getModeIndex = idx =>
+        {
+            // Try to get modeIndex from cached data if available
+            var cached = typeof(ParticleSystemController)
+                .GetField("cachedParticleData", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+                ?.GetValue(particleSystemController) as System.Array;
+            if (cached != null && idx < cached.Length)
+            {
+                var modeIndexField = cached.GetType().GetElementType().GetField("modeIndex");
+                if (modeIndexField != null)
+                    return (int)modeIndexField.GetValue(cached.GetValue(idx));
+            }
+            // Fallback: use 0
+            return 0;
+        };
+
+        foreach (var bond in bonds)
+        {
+            int modeA = getModeIndex(bond.cellA);
+            int modeB = getModeIndex(bond.cellB);
+            float splitYawA = 0f, splitPitchA = 0f;
+            float splitYawB = 0f, splitPitchB = 0f;
+            if (modeA >= 0 && modeA < genome.modes.Count)
+            {
+                splitYawA = genome.modes[modeA].parentSplitYaw;
+                splitPitchA = genome.modes[modeA].parentSplitPitch;
+            }
+            if (modeB >= 0 && modeB < genome.modes.Count)
+            {
+                splitYawB = genome.modes[modeB].parentSplitYaw;
+                splitPitchB = genome.modes[modeB].parentSplitPitch;
+            }
+            Vector3 posA = positions[bond.cellA];
+            Vector3 posB = positions[bond.cellB];
+            bond.zoneA = ClassifyBondDirection(posA, Quaternion.identity, posB, splitYawA, splitPitchA);
+            bond.zoneB = ClassifyBondDirection(posB, Quaternion.identity, posA, splitYawB, splitPitchB);
+        }
+    }
 }
