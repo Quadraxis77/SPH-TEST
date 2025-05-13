@@ -84,7 +84,8 @@ public class ParticleSystemController : MonoBehaviour
     Vector3 dragTargetWorld;
     private Vector3[] cpuParticlePositions;
     public Vector3[] CpuParticlePositions => cpuParticlePositions;
-    Quaternion[] cpuParticleRotations;
+    private Quaternion[] cpuParticleRotations;
+    public Quaternion[] CpuParticleRotations => cpuParticleRotations;
 
     private float currentDragDistance;
     private int activeParticleCount = 1; // Class-level variable to track active particles
