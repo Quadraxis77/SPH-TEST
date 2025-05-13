@@ -6,10 +6,8 @@ using TMPro;
 
 public class ParticleSystemController : MonoBehaviour
 {
-    // Initialize these variables to empty collections to avoid null reference exceptions
-    private Dictionary<int, AdhesionConnections.Cell> currentCells = new Dictionary<int, AdhesionConnections.Cell>();
-    private HashSet<AdhesionConnections.Bond> currentBonds = new HashSet<AdhesionConnections.Bond>();
-    
+    #region Public Properties
+
     [Header("Particle Configuration")]
     public int particleCount = 10000;
     public float minRadius = 1.5f;
@@ -47,15 +45,13 @@ public class ParticleSystemController : MonoBehaviour
     public float labelOffset = 2.5f;
     public float labelScale = 0.5f;
     public Color labelColor = Color.white;
+    
+    #endregion
 
-    [Header("Adhesion Settings")]
-    public Color adhesionLineColor = Color.yellow;
-    [Range(1.0f, 5.0f)] public float adhesionConnectionDistance = 2.5f;
-
+    #region Private Fields
+    
     private LineRenderer circleRenderer;
     private LineRenderer lineRenderer;
-
-    private List<LineRenderer> adhesionLineRenderers = new List<LineRenderer>();
 
     ComputeBuffer particleBuffer, dragInputBuffer, drawArgsBufferSpheres;
     ComputeBuffer positionReadbackBuffer, rotationReadbackBuffer;
@@ -89,6 +85,27 @@ public class ParticleSystemController : MonoBehaviour
     // Timer variables for cell splitting
     private float[] cellSplitTimers;
     
+    // List to track pending cell splits
+    private List<CellSplitData> pendingSplits = new List<CellSplitData>();
+
+    // Add member variables to track readback requests
+    private bool particleDataReadbackInProgress = false;
+    private Particle[] cachedParticleData;
+    
+    // Add a flag to track if our cached particle data is ready/valid
+    private bool cachedParticleDataValid = false;
+
+    // Particle label array
+    private TextMeshPro[] particleLabels;    // Add a new buffer to hold genome mode data for the shader
+    private ComputeBuffer genomeModesBuffer;
+    
+    // Array to store formatted IDs for each particle
+    private ParticleIDData[] particleIDs;
+    
+    #endregion
+
+    #region Data Structures
+    
     // Struct for cell division data
     private struct CellSplitData
     {
@@ -102,9 +119,6 @@ public class ParticleSystemController : MonoBehaviour
         public int childAModeIndex;
         public int childBModeIndex;
     }
-    
-    // List to track pending cell splits
-    private List<CellSplitData> pendingSplits = new List<CellSplitData>();
 
     struct DragInput
     {
@@ -112,7 +126,7 @@ public class ParticleSystemController : MonoBehaviour
         public Vector3 targetPosition;
         public float strength;
     }
-
+    
     // The Particle struct used to match with the compute shader definition
     struct Particle
     {
@@ -133,53 +147,38 @@ public class ParticleSystemController : MonoBehaviour
         public Quaternion rotation;
         public int modeIndex; // Added field to store the mode index
     }
-
-    // Now using AdhesionConnections.ParticleIDData instead of a local struct
-    // Array to store formatted IDs for each particle
-    private AdhesionConnections.ParticleIDData[] particleIDs;
-
-    // Add member variables to track readback requests
-    private bool particleDataReadbackInProgress = false;
-    private Particle[] cachedParticleData;
     
-    // Add a flag to track if our cached particle data is ready/valid
-    private bool cachedParticleDataValid = false;
-
-    // Particle label array
-    private TextMeshPro[] particleLabels;
-
-    // Add a new buffer to hold genome mode data for the shader
-    private ComputeBuffer genomeModesBuffer;
-    
-    // Struct that matches the GenomeAdhesionData in the shader
-    private struct GenomeAdhesionData
+    // Custom struct to store particle ID data
+    public struct ParticleIDData
     {
-        public int parentMakeAdhesion;
-        public int childA_KeepAdhesion;
-        public int childB_KeepAdhesion;
-        public float adhesionRestLength;
-        public float adhesionSpringStiffness;
-        public float adhesionSpringDamping;
+        public int parentID;
+        public int uniqueID;
+        public char childType;
+        
+        public string GetFormattedID()
+        {
+            if (childType == '\0') // Default value for char
+                return "Unknown";
+                
+            return $"{parentID:D2}.{uniqueID:D2}.{childType}";
+        }
+    }
+      
+    // Struct that matches the GenomeColorData in the shader
+    private struct GenomeColorData
+    {
         public uint colorPacked;
         public float orientConstraintStrength;
         public float maxAngleDeviation;
     }
     
-    // Utility function to pack a Color into a uint
-    private uint PackColorToUint(Color color)
-    {
-        uint r = (uint)(color.r * 255);
-        uint g = (uint)(color.g * 255);
-        uint b = (uint)(color.b * 255);
-        return (r << 16) | (g << 8) | b;
-    }
+    #endregion
 
+    #region Unity Lifecycle Methods
+    
     void Start()
     {
         Application.targetFrameRate = 144;
-        
-        // Clear any static data from previous runs
-        AdhesionConnections.ClearStaticData();
         
         // Subscribe to genome changes
         if (genome != null)
@@ -204,68 +203,12 @@ public class ParticleSystemController : MonoBehaviour
         
         // Create and initialize the genome modes buffer for colors
         UpdateGenomeModesBuffer();
-        
-        // Initialize particles with genome properties
+          // Initialize particles with genome properties
         InitializeParticles();
         
         // Initialize particle labels
         InitializeParticleLabels();
-        
-        // Simulate and create adhesion connections at startup
-        SimulateAdhesionConnections();
-    }
-
-    private void SimulateAdhesionConnections()
-    {
-        // Validate that we have the required data before attempting to create connections
-        if (cpuParticlePositions == null || cpuParticleRotations == null || 
-            activeParticleCount <= 0 || particleIDs == null)
-        {
-            Debug.LogWarning("Cannot create adhesion connections: missing required data.");
-            return;
-        }
-        
-        // Additional validation for the data arrays
-        for (int i = 0; i < activeParticleCount; i++)
-        {
-            if (i >= cpuParticlePositions.Length || i >= cpuParticleRotations.Length || i >= particleIDs.Length)
-            {
-                Debug.LogWarning("Cannot create adhesion connections: data array length mismatch.");
-                return;
-            }
-            
-            // Validate positions
-            if (float.IsNaN(cpuParticlePositions[i].x) || float.IsInfinity(cpuParticlePositions[i].x))
-            {
-                Debug.LogWarning($"Invalid position data for particle {i}: {cpuParticlePositions[i]}");
-                // Continue anyway, the CreateAdhesionsFromParticles method will filter these out
-            }
-        }
-        
-        // Store the current bonds before creating new ones (to enable tracking inheritance)
-        if (currentBonds != null && currentBonds.Count > 0) 
-        {
-            AdhesionConnections.SetCurrentBonds(this, currentBonds);
-        }
-        
-        // Use AdhesionConnections class methods to generate connections
-        // We're not using maxBondDistance anymore - passing 0 as it will be ignored
-        var (cells, bonds) = AdhesionConnections.CreateAdhesionsFromParticles(
-            cpuParticlePositions,
-            cpuParticleRotations,
-            activeParticleCount,
-            particleIDs,
-            this,
-            0
-        );
-        
-        // Update current cells and bonds
-        currentCells = cells;
-        currentBonds = bonds;
-        
-        // Visualize the connections
-        UpdateAdhesionConnectionsVisual();
-    }
+    }    // SimulateAdhesionConnections method has been removed as part of bond removal
 
     void Update()
     {
@@ -327,18 +270,9 @@ public class ParticleSystemController : MonoBehaviour
 
         computeShader.SetBuffer(kernelCopyRotations, "particleBuffer", particleBuffer);
         computeShader.SetBuffer(kernelCopyRotations, "rotationReadbackBuffer", rotationReadbackBuffer);
-        computeShader.Dispatch(kernelCopyRotations, threadGroups, 1, 1);
-
-        // Immediate readback of position and rotation data for rendering
+        computeShader.Dispatch(kernelCopyRotations, threadGroups, 1, 1);        // Immediate readback of position and rotation data for rendering
         positionReadbackBuffer.GetData(cpuParticlePositions);
         rotationReadbackBuffer.GetData(cpuParticleRotations);
-        
-        // Update adhesion connections every frame with fresh position data
-        if (activeParticleCount > 0 && currentBonds != null && currentBonds.Count > 0)
-        {
-            // Just update the visualization with current cell positions, don't recreate bonds
-            UpdateAdhesionConnectionsVisual();
-        }
 
         uint[] args = new uint[5];
         drawArgsBufferSpheres.GetData(args);
@@ -352,279 +286,16 @@ public class ParticleSystemController : MonoBehaviour
         Graphics.DrawMeshInstancedIndirect(
             sphereMesh, 0, sphereMaterial,
             new Bounds(Vector3.zero, Vector3.one * spawnRadius * 2f),
-            drawArgsBufferSpheres);
-
-        UpdateDragVisualization();
+            drawArgsBufferSpheres);        UpdateDragVisualization();
         UpdateParticleLabels();  // refresh labels
-    }
+    }    // UpdateAdhesionConnectionsVisual method has been removed as part of bond removal
 
-    // Update adhesion connection positions with the latest particle positions
-    private void UpdateAdhesionConnectionsVisual()
-    {
-        if (currentCells == null || currentBonds == null || currentBonds.Count == 0)
-        {
-            // Destroy all existing line renderers if no bonds exist
-            foreach (var line in adhesionLineRenderers)
-            {
-                if (line != null) Destroy(line.gameObject);
-            }
-            adhesionLineRenderers.Clear();
-            return;
-        }
-
-        // Create or get parent GameObject for adhesion connections
-        GameObject adhesionsParent = GameObject.Find("AdhesionConnections");
-        if (adhesionsParent == null)
-        {
-            adhesionsParent = new GameObject("AdhesionConnections");
-            adhesionsParent.transform.SetParent(transform);
-        }
-
-        // First, clean up any outdated line renderers - keep track of current valid bonds
-        HashSet<string> validBonds = new HashSet<string>();
-        
-        // Create this mapping for quick lookups in the update phase
-        Dictionary<string, int> idToIndexMap = new Dictionary<string, int>();
-        for (int i = 0; i < activeParticleCount; i++)
-        {
-            if (i < particleIDs.Length)
-            {
-                string id = particleIDs[i].GetFormattedID();
-                idToIndexMap[id] = i;
-            }
-        }
-        
-        // Build valid bonds set using the current bond data
-        foreach (var bond in currentBonds)
-        {
-            if (bond.A >= 0 && bond.A < activeParticleCount && 
-                bond.B >= 0 && bond.B < activeParticleCount)
-            {
-                string idA = particleIDs[bond.A].GetFormattedID();
-                string idB = particleIDs[bond.B].GetFormattedID();
-                
-                // Create a consistent bond key (always put lower ID first to avoid duplicates)
-                string bondKey = string.Compare(idA, idB) < 0 ? 
-                    $"Bond_{idA}_to_{idB}" : 
-                    $"Bond_{idB}_to_{idA}";
-                
-                validBonds.Add(bondKey);
-            }
-        }
-        
-        // Remove any line renderers that are not in the valid bonds set
-        for (int i = adhesionLineRenderers.Count - 1; i >= 0; i--)
-        {
-            var line = adhesionLineRenderers[i];
-            if (line == null)
-            {
-                adhesionLineRenderers.RemoveAt(i);
-                continue;
-            }
-            
-            string name = line.gameObject.name;
-            if (!validBonds.Contains(name))
-            {
-                Destroy(line.gameObject);
-                adhesionLineRenderers.RemoveAt(i);
-            }
-        }
-
-        // Create new line renderers for any new bonds
-        foreach (var bond in currentBonds)
-        {
-            if (bond.A >= 0 && bond.A < activeParticleCount && 
-                bond.B >= 0 && bond.B < activeParticleCount)
-            {
-                Vector3 posA = cpuParticlePositions[bond.A];
-                Vector3 posB = cpuParticlePositions[bond.B];
-
-                if (IsValidPosition(posA) && IsValidPosition(posB))
-                {
-                    // Get formatted IDs for the particles in this bond
-                    string idA = particleIDs[bond.A].GetFormattedID();
-                    string idB = particleIDs[bond.B].GetFormattedID();
-                    
-                    // Create a consistent bond key (always put lower ID first to avoid duplicates)
-                    string bondKey = string.Compare(idA, idB) < 0 ? 
-                        $"Bond_{idA}_to_{idB}" : 
-                        $"Bond_{idB}_to_{idA}";
-                    
-                    // Store which actual particle indices correspond to which IDs for this bond
-                    int indexA = bond.A;
-                    int indexB = bond.B;
-                    
-                    // Check if this bond already exists
-                    bool bondExists = false;
-                    foreach (var line in adhesionLineRenderers)
-                    {
-                        if (line != null && line.gameObject.name == bondKey)
-                        {
-                            bondExists = true;
-                            line.SetPosition(0, posA);
-                            line.SetPosition(1, posB);
-                            break;
-                        }
-                    }
-                    
-                    // Create new bond if it doesn't exist
-                    if (!bondExists)
-                    {
-                        GameObject lineObject = new GameObject(bondKey);
-                        lineObject.transform.SetParent(adhesionsParent.transform);
-                        
-                        LineRenderer lineRenderer = lineObject.AddComponent<LineRenderer>();
-                        lineRenderer.startWidth = 0.05f;
-                        lineRenderer.endWidth = 0.05f;
-                        lineRenderer.material = new Material(Shader.Find("Sprites/Default"));
-                        lineRenderer.material.color = adhesionLineColor;
-                        lineRenderer.positionCount = 2;
-                        lineRenderer.SetPosition(0, posA);
-                        lineRenderer.SetPosition(1, posB);
-
-                        adhesionLineRenderers.Add(lineRenderer);
-                    }
-                }
-            }
-        }
-    }
-
-    // Update labels each frame
-    private void UpdateParticleLabels()
-    {
-        if (!showParticleLabels)
-        {
-            if (particleLabels != null)
-                foreach (var lbl in particleLabels) if (lbl != null) lbl.enabled = false;
-            return;
-        }
-        if (Camera.main == null) return;
-
-        int count = Mathf.Min(activeParticleCount, particleLabels.Length);
-        for (int i = 0; i < count; i++)
-        {
-            var tmp = particleLabels[i];
-            if (tmp == null) continue;
-            
-            // Validate particle position before using it
-            Vector3 particlePos = cpuParticlePositions[i];
-            if (float.IsNaN(particlePos.x) || float.IsNaN(particlePos.y) || float.IsNaN(particlePos.z))
-            {
-                tmp.enabled = false;
-                continue; // Skip this label if the position contains NaN
-            }
-            
-            // Position labels slightly lower than before by adding a small negative Y offset
-            Vector3 pos = particlePos + (Vector3.up * labelOffset * 0.5f);
-            
-            // Additional validation before setting the position
-            if (float.IsNaN(pos.x) || float.IsNaN(pos.y) || float.IsNaN(pos.z))
-            {
-                tmp.enabled = false;
-                continue;
-            }
-            
-            tmp.transform.position = pos;
-            tmp.transform.rotation = Camera.main.transform.rotation;
-            
-            // Display the formatted ID
-            string text = "";
-            if (particleIDs != null && i < particleIDs.Length) 
-            {
-                text = particleIDs[i].GetFormattedID();
-                
-                // Update GameObject name to use the formatted ID for better hierarchy organization
-                string labelName = $"Label_{text}";
-                if (tmp.gameObject.name != labelName)
-                {
-                    tmp.gameObject.name = labelName;
-                }
-            }
-            
-            tmp.text = text;
-            tmp.enabled = true;
-        }
-        for (int i = count; i < particleLabels.Length; i++)
-        {
-            if (particleLabels[i] != null) particleLabels[i].enabled = false;
-        }
-    }
-
-    void HandleMouseDrag()
-    {
-        if (Input.GetMouseButtonDown(0))
-        {
-            Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
-            float closestDist = Mathf.Infinity;
-            int closestID = -1;
-            
-            for (int i = 0; i < cpuParticlePositions.Length; i++)
-            {
-                Vector3 center = cpuParticlePositions[i];
-                float r = maxRadius;
-                Vector3 oc = ray.origin - center;
-                float a = Vector3.Dot(ray.direction, ray.direction);
-                float b = 2.0f * Vector3.Dot(oc, ray.direction);
-                float c = Vector3.Dot(oc, oc) - r * r;
-                float discriminant = b * b - 4.0f * a * c;
-
-                if (discriminant > 0)
-                {
-                    float t = (-b - Mathf.Sqrt(discriminant)) / (2.0f * a);
-                    if (t > 0 && t < closestDist)
-                    {
-                        closestID = i;
-                        closestDist = t;
-                    }
-                }
-            }
-
-            if (closestID != -1)
-            {
-                selectedParticleID = closestID;
-                dragTargetWorld = cpuParticlePositions[selectedParticleID];
-                
-                currentDragDistance = Vector3.Distance(Camera.main.transform.position, dragTargetWorld);
-            }
-        }
-
-        if (Input.GetMouseButton(0) && selectedParticleID != -1)
-        {
-            Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
-            dragTargetWorld = Camera.main.transform.position + ray.direction * currentDragDistance;
-        }
-
-        if (Input.GetMouseButtonUp(0))
-        {
-            selectedParticleID = -1;
-        }
-
-        DragInput drag = new DragInput
-        {
-            selectedID = selectedParticleID,
-            targetPosition = dragTargetWorld,
-            strength = Input.GetMouseButton(0) ? 100f : 0f
-        };
-        dragInputBuffer.SetData(new DragInput[] { drag });
-    }
-
-    void OnDestroy()
-    {
-        // Unsubscribe from genome events
-        if (genome != null)
-        {
-            CellGenome.OnGenomeChanged -= OnGenomeChanged;
-        }
-
-        // Release all buffers
-        ReleaseBuffers();
-    }
-
+    #endregion
+    
+    #region Event Handlers
+    
     void OnGenomeChanged()
     {
-        // Clear static data and reinitialize particles when genome changes
-        AdhesionConnections.ClearStaticData();
-        
         // Update the genome modes buffer when the genome changes
         UpdateGenomeModesBuffer();
         
@@ -634,7 +305,11 @@ public class ParticleSystemController : MonoBehaviour
             InitializeParticles();
         }
     }
+    
+    #endregion
 
+    #region Initialization and Cleanup
+    
     private void InitializeBuffers()
     {
         int stride = 84; // Updated from 80 to 84 to include the modeIndex field
@@ -704,16 +379,8 @@ public class ParticleSystemController : MonoBehaviour
         gridNext?.Release();
         gridParticleIndices?.Release();
         torqueAccumBuffer?.Release();
-        genomeModesBuffer?.Release(); // Release the genome modes buffer
-
-        if (circleRenderer != null) Destroy(circleRenderer.gameObject);
+        genomeModesBuffer?.Release(); // Release the genome modes buffer        if (circleRenderer != null) Destroy(circleRenderer.gameObject);
         if (lineRenderer != null) Destroy(lineRenderer.gameObject);
-        
-        foreach (var line in adhesionLineRenderers)
-        {
-            if (line != null) Destroy(line.gameObject);
-        }
-        adhesionLineRenderers.Clear();
         
         if (particleLabels != null)
         {
@@ -728,11 +395,10 @@ public class ParticleSystemController : MonoBehaviour
     }
 
     private void InitializeParticles()
-    {
-        // Initialize particle IDs array
+    {        // Initialize particle IDs array
         if (particleIDs == null || particleIDs.Length != particleCount)
         {
-            particleIDs = new AdhesionConnections.ParticleIDData[particleCount];
+            particleIDs = new ParticleIDData[particleCount];
             
             // Set initial particle (root cell) with ID 00.00.A
             particleIDs[0].parentID = 0;
@@ -798,20 +464,51 @@ public class ParticleSystemController : MonoBehaviour
         }
     }
 
-    private int GetInitialModeIndex()
+    private void InitializeParticleLabels()
     {
-        if (genome == null || genome.modes.Count == 0)
-            return 0;
-            
-        for (int i = 0; i < genome.modes.Count; i++)
+        if (particleLabels == null || particleLabels.Length != particleCount)
         {
-            if (genome.modes[i].isInitial)
-                return i;
+            // clean up old labels
+            if (particleLabels != null)
+            {
+                foreach (var lbl in particleLabels) if (lbl != null) Destroy(lbl.gameObject);
+            }
+            GameObject labelsParent = new GameObject("ParticleLabels");
+            labelsParent.transform.SetParent(transform);
+            particleLabels = new TextMeshPro[particleCount];
+            
+            // Only create actual GameObjects for active particles
+            // This saves memory and keeps the hierarchy clean
+            for (int i = 0; i < activeParticleCount; i++)
+            {
+                // Create label name using particle ID if available, otherwise use index
+                string labelName;
+                if (particleIDs != null && i < particleIDs.Length && i < activeParticleCount)
+                {
+                    labelName = $"Label_{particleIDs[i].GetFormattedID()}";
+                }
+                else
+                {
+                    labelName = $"Label_{i}";
+                }
+                
+                GameObject labelObj = new GameObject(labelName);
+                labelObj.transform.SetParent(labelsParent.transform);
+                var tmp = labelObj.AddComponent<TextMeshPro>();
+                tmp.alignment = TextAlignmentOptions.Center;
+                tmp.fontSize = 3;
+                tmp.color = labelColor;
+                tmp.transform.localScale = Vector3.one * labelScale;
+                tmp.enabled = false;
+                particleLabels[i] = tmp;
+            }
         }
-        
-        return 0; // Default to first mode if no initial mode is marked
     }
+    
+    #endregion
 
+    #region Cell Division and Management
+    
     private void UpdateCellDivisionTimers(float deltaTime)
     {
         if (cellSplitTimers == null || cellSplitTimers.Length < activeParticleCount)
@@ -996,12 +693,10 @@ public class ParticleSystemController : MonoBehaviour
         }
 
         Particle[] particleData = new Particle[particleCount];
-        particleBuffer.GetData(particleData);
-
-        // Ensure particleIDs array is initialized and large enough
+        particleBuffer.GetData(particleData);        // Ensure particleIDs array is initialized and large enough
         if (particleIDs == null || particleIDs.Length < particleCount)
         {
-            AdhesionConnections.ParticleIDData[] newParticleIDs = new AdhesionConnections.ParticleIDData[particleCount];
+            ParticleIDData[] newParticleIDs = new ParticleIDData[particleCount];
             if (particleIDs != null)
             {
                 System.Array.Copy(particleIDs, newParticleIDs, System.Math.Min(particleIDs.Length, particleCount));
@@ -1037,18 +732,9 @@ public class ParticleSystemController : MonoBehaviour
             // We'll reuse the parent's slot for Child A, and add Child B at the end
             int childAIndex = parentIndex; // Reuse parent's slot
             int childBIndex = activeParticleCount; // Add at the end
-            
-            // Use global counter for uniqueIDs to ensure they're never reused
+              // Use global counter for uniqueIDs to ensure they're never reused
             int childAUniqueID = nextUniqueIDCounter++;
             int childBUniqueID = nextUniqueIDCounter++;
-
-            // Register this cell division with the AdhesionConnections class to track split direction
-            AdhesionConnections.RegisterCellDivision(
-                originalParentID, 
-                cpuParticlePositions[parentIndex], 
-                split.positionA, 
-                split.positionB
-            );
 
             // Overwrite parent with Child A
             particleData[childAIndex].position = split.positionA;
@@ -1105,22 +791,113 @@ public class ParticleSystemController : MonoBehaviour
         
         // Clear pending splits after processing
         pendingSplits.Clear();
-        
-        // Create labels for the new particles
+          // Create labels for the new particles
         CreateLabelsForNewParticles(newParticleIndices, newParticleIds);
         
         // Log active particle count for debugging
         Debug.Log($"Active particle count after splits: {activeParticleCount}");
-        
-        // Since we've made cell splits, we should recreate adhesion connections
-        SimulateAdhesionConnections();
     }
 
     private Vector3 GetDirection(float yaw, float pitch)
     {
         return Quaternion.Euler(pitch, yaw, 0f) * Vector3.forward;
     }
+    
+    #endregion
 
+    #region Particle Interaction
+    
+    void HandleMouseDrag()
+    {
+        if (Input.GetMouseButtonDown(0))
+        {
+            Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
+            float closestDist = Mathf.Infinity;
+            int closestID = -1;
+            
+            for (int i = 0; i < cpuParticlePositions.Length; i++)
+            {
+                Vector3 center = cpuParticlePositions[i];
+                float r = maxRadius;
+                Vector3 oc = ray.origin - center;
+                float a = Vector3.Dot(ray.direction, ray.direction);
+                float b = 2.0f * Vector3.Dot(oc, ray.direction);
+                float c = Vector3.Dot(oc, oc) - r * r;
+                float discriminant = b * b - 4.0f * a * c;
+
+                if (discriminant > 0)
+                {
+                    float t = (-b - Mathf.Sqrt(discriminant)) / (2.0f * a);
+                    if (t > 0 && t < closestDist)
+                    {
+                        closestID = i;
+                        closestDist = t;
+                    }
+                }
+            }
+
+            if (closestID != -1)
+            {
+                selectedParticleID = closestID;
+                dragTargetWorld = cpuParticlePositions[selectedParticleID];
+                
+                currentDragDistance = Vector3.Distance(Camera.main.transform.position, dragTargetWorld);
+            }
+        }
+
+        if (Input.GetMouseButton(0) && selectedParticleID != -1)
+        {
+            Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
+            dragTargetWorld = Camera.main.transform.position + ray.direction * currentDragDistance;
+        }
+
+        if (Input.GetMouseButtonUp(0))
+        {
+            selectedParticleID = -1;
+        }
+
+        DragInput drag = new DragInput
+        {
+            selectedID = selectedParticleID,
+            targetPosition = dragTargetWorld,
+            strength = Input.GetMouseButton(0) ? 100f : 0f
+        };
+        dragInputBuffer.SetData(new DragInput[] { drag });
+    }
+
+    private void UpdateDragVisualization()
+    {
+        if (selectedParticleID != -1)
+        {
+            // Update circle
+            Vector3 cameraForward = Camera.main.transform.forward;
+            Vector3 cameraRight = Camera.main.transform.right;
+            Vector3 cameraUp = Vector3.Cross(cameraForward, cameraRight);
+
+            for (int i = 0; i < 36; i++)
+            {
+                float angle = Mathf.Deg2Rad * (i * 10);
+                Vector3 point = dragTargetWorld + (Mathf.Cos(angle) * cameraRight + Mathf.Sin(angle) * cameraUp) * dragCircleRadius;
+                circleRenderer.SetPosition(i, point);
+            }
+            circleRenderer.enabled = true;
+
+            // Update line
+            lineRenderer.SetPosition(0, cpuParticlePositions[selectedParticleID]);
+            lineRenderer.SetPosition(1, dragTargetWorld);
+            lineRenderer.enabled = true;
+        }
+        else
+        {
+            circleRenderer.enabled = false;
+            lineRenderer.enabled = false;
+        }
+    }
+    
+    #endregion
+
+    #region GPU Data Management
+    
     private void RequestParticleDataAsync()
     {
         if (!particleDataReadbackInProgress && !cachedParticleDataValid)
@@ -1142,21 +919,9 @@ public class ParticleSystemController : MonoBehaviour
                 }
                 
                 r.GetData<Particle>().CopyTo(cachedParticleData);
-                
-                // Set cached data as valid
+                  // Set cached data as valid
                 cachedParticleDataValid = true;
                 particleDataReadbackInProgress = false;
-                
-                // Check if we have both position and rotation data available
-                if (cpuParticlePositions != null && cpuParticleRotations != null && 
-                    cpuParticlePositions.Length > 0 && cpuParticleRotations.Length > 0)
-                {
-                    if (activeParticleCount > 0)
-                    {
-                        // Update adhesion connections immediately after getting fresh particle data
-                        SimulateAdhesionConnections();
-                    }
-                }
             });
         }
         
@@ -1181,12 +946,11 @@ public class ParticleSystemController : MonoBehaviour
 
     // Resize particle buffers when more capacity is needed
     private void ResizeParticleBuffers(int newCapacity)
-    {
-        // Store old data
+    {        // Store old data
         Particle[] oldParticleData = new Particle[particleCount];
         particleBuffer.GetData(oldParticleData);
         
-        AdhesionConnections.ParticleIDData[] oldIDData = new AdhesionConnections.ParticleIDData[particleCount];
+        ParticleIDData[] oldIDData = new ParticleIDData[particleCount];
         if (particleIDs != null)
         {
             System.Array.Copy(particleIDs, oldIDData, particleCount);
@@ -1211,9 +975,8 @@ public class ParticleSystemController : MonoBehaviour
         Particle[] newParticleData = new Particle[particleCount];
         System.Array.Copy(oldParticleData, newParticleData, oldParticleData.Length);
         particleBuffer.SetData(newParticleData);
-        
-        // Restore particle IDs
-        particleIDs = new AdhesionConnections.ParticleIDData[particleCount];
+          // Restore particle IDs
+        particleIDs = new ParticleIDData[particleCount];
         System.Array.Copy(oldIDData, particleIDs, oldIDData.Length);
         
         // Restore split timers
@@ -1241,48 +1004,142 @@ public class ParticleSystemController : MonoBehaviour
         InitializeParticleLabels();
     }
 
-    // Initialize text labels for each particle
-    private void InitializeParticleLabels()
+    private void UpdateGenomeModesBuffer()
     {
-        if (particleLabels == null || particleLabels.Length != particleCount)
+        if (genome == null || genome.modes.Count == 0)
         {
-            // clean up old labels
-            if (particleLabels != null)
-            {
-                foreach (var lbl in particleLabels) if (lbl != null) Destroy(lbl.gameObject);
-            }
-            GameObject labelsParent = new GameObject("ParticleLabels");
-            labelsParent.transform.SetParent(transform);
-            particleLabels = new TextMeshPro[particleCount];
-            
-            // Only create actual GameObjects for active particles
-            // This saves memory and keeps the hierarchy clean
-            for (int i = 0; i < activeParticleCount; i++)
-            {
-                // Create label name using particle ID if available, otherwise use index
-                string labelName;
-                if (particleIDs != null && i < particleIDs.Length && i < activeParticleCount)
-                {
-                    labelName = $"Label_{particleIDs[i].GetFormattedID()}";
-                }
-                else
-                {
-                    labelName = $"Label_{i}";
-                }
-                
-                GameObject labelObj = new GameObject(labelName);
-                labelObj.transform.SetParent(labelsParent.transform);
-                var tmp = labelObj.AddComponent<TextMeshPro>();
-                tmp.alignment = TextAlignmentOptions.Center;
-                tmp.fontSize = 3;
-                tmp.color = labelColor;
-                tmp.transform.localScale = Vector3.one * labelScale;
-                tmp.enabled = false;
-                particleLabels[i] = tmp;
-            }
+            Debug.LogWarning("Cannot update genome modes buffer: No genome or modes available");
+            return;
         }
+
+        // Release existing buffer if any
+        if (genomeModesBuffer != null)
+        {
+            genomeModesBuffer.Release();
+            genomeModesBuffer = null;
+        }
+
+        // Create a new buffer with the current number of genome modes
+        int modeCount = genome.modes.Count;
+        genomeModesBuffer = new ComputeBuffer(modeCount, 3 * 4); // 3 fields * 4 bytes each
+
+        // Create and populate the data array
+        GenomeColorData[] modeData = new GenomeColorData[modeCount];
+
+        for (int i = 0; i < modeCount; i++)
+        {
+            GenomeMode mode = genome.modes[i];
+            
+            // Pack the color into a uint using our utility method
+            uint colorPacked = PackColorToUint(mode.modeColor);
+            
+            modeData[i] = new GenomeColorData
+            {
+                colorPacked = colorPacked,
+                orientConstraintStrength = mode.orientationConstraintStrength,
+                maxAngleDeviation = mode.maxAllowedAngleDeviation
+            };
+            
+            Debug.Log($"Mode {i} ({mode.modeName}): Packed color 0x{colorPacked:X6} from {mode.modeColor}");
+        }
+        
+        // Set the data to the buffer
+        genomeModesBuffer.SetData(modeData);
+        
+        // Set buffer and default mode index in the shader material
+        sphereMaterial.SetBuffer("genomeModesBuffer", genomeModesBuffer);
+        sphereMaterial.SetInt("defaultGenomeMode", GetInitialModeIndex());
+        
+        Debug.Log($"Updated genome modes buffer with {modeCount} modes");
+    }
+    
+    // Utility function to pack a Color into a uint
+    private uint PackColorToUint(Color color)
+    {
+        uint r = (uint)(color.r * 255);
+        uint g = (uint)(color.g * 255);
+        uint b = (uint)(color.b * 255);
+        return (r << 16) | (g << 8) | b;
     }
 
+    private int GetInitialModeIndex()
+    {
+        if (genome == null || genome.modes.Count == 0)
+            return 0;
+            
+        for (int i = 0; i < genome.modes.Count; i++)
+        {
+            if (genome.modes[i].isInitial)
+                return i;
+        }
+        
+        return 0; // Default to first mode if no initial mode is marked
+    }
+    
+    #endregion
+
+    #region UI and Visualization
+    
+    private void UpdateParticleLabels()
+    {
+        if (!showParticleLabels)
+        {
+            if (particleLabels != null)
+                foreach (var lbl in particleLabels) if (lbl != null) lbl.enabled = false;
+            return;
+        }
+        if (Camera.main == null) return;
+
+        int count = Mathf.Min(activeParticleCount, particleLabels.Length);
+        for (int i = 0; i < count; i++)
+        {
+            var tmp = particleLabels[i];
+            if (tmp == null) continue;
+            
+            // Validate particle position before using it
+            Vector3 particlePos = cpuParticlePositions[i];
+            if (float.IsNaN(particlePos.x) || float.IsNaN(particlePos.y) || float.IsNaN(particlePos.z))
+            {
+                tmp.enabled = false;
+                continue; // Skip this label if the position contains NaN
+            }
+            
+            // Position labels slightly lower than before by adding a small negative Y offset
+            Vector3 pos = particlePos + (Vector3.up * labelOffset * 0.5f);
+            
+            // Additional validation before setting the position
+            if (float.IsNaN(pos.x) || float.IsNaN(pos.y) || float.IsNaN(pos.z))
+            {
+                tmp.enabled = false;
+                continue;
+            }
+            
+            tmp.transform.position = pos;
+            tmp.transform.rotation = Camera.main.transform.rotation;
+            
+            // Display the formatted ID
+            string text = "";
+            if (particleIDs != null && i < particleIDs.Length) 
+            {
+                text = particleIDs[i].GetFormattedID();
+                
+                // Update GameObject name to use the formatted ID for better hierarchy organization
+                string labelName = $"Label_{text}";
+                if (tmp.gameObject.name != labelName)
+                {
+                    tmp.gameObject.name = labelName;
+                }
+            }
+            
+            tmp.text = text;
+            tmp.enabled = true;
+        }
+        for (int i = count; i < particleLabels.Length; i++)
+        {
+            if (particleLabels[i] != null) particleLabels[i].enabled = false;
+        }
+    }
+    
     private void CreateLabelsForNewParticles(List<int> indices, List<string> ids)
     {
         if (indices == null || ids == null || indices.Count != ids.Count)
@@ -1331,159 +1188,6 @@ public class ParticleSystemController : MonoBehaviour
             }
         }
     }
-
-    /// <summary>
-    /// Gets the active genome mode for the current simulation
-    /// </summary>
-    public GenomeMode GetActiveGenomeMode()
-    {
-        if (genome == null || genome.modes.Count == 0)
-            return null;
-            
-        // Get the first particle's mode index
-        if (activeParticleCount > 0 && particleBuffer != null)
-        {
-            Particle[] particleData = new Particle[1];
-            particleBuffer.GetData(particleData, 0, 0, 1);
-            int modeIndex = particleData[0].modeIndex;
-            
-            if (modeIndex >= 0 && modeIndex < genome.modes.Count)
-            {
-                return genome.modes[modeIndex];
-            }
-        }
-        
-        // Fallback to the initial mode
-        return genome.modes.Find(m => m.isInitial) ?? genome.modes[0];
-    }
-
-    /// <summary>
-    /// Gets the genome mode for a specific particle by reading from the particle buffer
-    /// </summary>
-    public GenomeMode GetGenomeModeForParticle(int particleIndex)
-    {
-        if (genome == null || genome.modes.Count == 0 || particleIndex < 0 || particleIndex >= activeParticleCount)
-            return null;
-        
-        // Read the mode index from the particle data
-        Particle[] particleData = new Particle[1];
-        particleBuffer.GetData(particleData, 0, particleIndex, 1);
-        int modeIndex = particleData[0].modeIndex;
-        
-        // Make sure the mode index is valid
-        if (modeIndex >= 0 && modeIndex < genome.modes.Count)
-        {
-            return genome.modes[modeIndex];
-        }
-        
-        // If mode index is invalid, fall back to the initial mode
-        return genome.modes.Find(m => m.isInitial) ?? genome.modes[0];
-    }
-
-    /// <summary>
-    /// Gets the current particle IDs array
-    /// </summary>
-    public AdhesionConnections.ParticleIDData[] GetParticleIDs()
-    {
-        return particleIDs;
-    }
-
-    private void UpdateDragVisualization()
-    {
-        if (selectedParticleID != -1)
-        {
-            // Update circle
-            Vector3 cameraForward = Camera.main.transform.forward;
-            Vector3 cameraRight = Camera.main.transform.right;
-            Vector3 cameraUp = Vector3.Cross(cameraForward, cameraRight);
-
-            for (int i = 0; i < 36; i++)
-            {
-                float angle = Mathf.Deg2Rad * (i * 10);
-                Vector3 point = dragTargetWorld + (Mathf.Cos(angle) * cameraRight + Mathf.Sin(angle) * cameraUp) * dragCircleRadius;
-                circleRenderer.SetPosition(i, point);
-            }
-            circleRenderer.enabled = true;
-
-            // Update line
-            lineRenderer.SetPosition(0, cpuParticlePositions[selectedParticleID]);
-            lineRenderer.SetPosition(1, dragTargetWorld);
-            lineRenderer.enabled = true;
-        }
-        else
-        {
-            circleRenderer.enabled = false;
-            lineRenderer.enabled = false;
-        }
-    }
-
-    /// <summary>
-    /// Creates and populates the genome modes buffer with genome mode data for the shader
-    /// </summary>
-    private void UpdateGenomeModesBuffer()
-    {
-        if (genome == null || genome.modes.Count == 0)
-        {
-            Debug.LogWarning("Cannot update genome modes buffer: No genome or modes available");
-            return;
-        }
-
-        // Release existing buffer if any
-        if (genomeModesBuffer != null)
-        {
-            genomeModesBuffer.Release();
-            genomeModesBuffer = null;
-        }
-
-        // Create a new buffer with the current number of genome modes
-        int modeCount = genome.modes.Count;
-        genomeModesBuffer = new ComputeBuffer(modeCount, 9 * 4); // 9 fields * 4 bytes each
-
-        // Create and populate the data array
-        GenomeAdhesionData[] modeData = new GenomeAdhesionData[modeCount];
-
-        for (int i = 0; i < modeCount; i++)
-        {
-            GenomeMode mode = genome.modes[i];
-            
-            // Convert booleans to integers for the shader
-            int parentMakeAdhesion = mode.parentMakeAdhesion ? 1 : 0;
-            int childA_KeepAdhesion = mode.childA_KeepAdhesion ? 1 : 0;
-            int childB_KeepAdhesion = mode.childB_KeepAdhesion ? 1 : 0;
-            
-            // Pack the color into a uint using our utility method
-            uint colorPacked = PackColorToUint(mode.modeColor);
-            
-            modeData[i] = new GenomeAdhesionData
-            {
-                parentMakeAdhesion = parentMakeAdhesion,
-                childA_KeepAdhesion = childA_KeepAdhesion,
-                childB_KeepAdhesion = childB_KeepAdhesion,
-                adhesionRestLength = mode.adhesionRestLength,
-                adhesionSpringStiffness = mode.adhesionSpringStiffness,
-                adhesionSpringDamping = mode.adhesionSpringDamping,
-                colorPacked = colorPacked,
-                orientConstraintStrength = mode.orientationConstraintStrength,
-                maxAngleDeviation = mode.maxAllowedAngleDeviation
-            };
-            
-            Debug.Log($"Mode {i} ({mode.modeName}): Packed color 0x{colorPacked:X6} from {mode.modeColor}");
-        }
-        
-        // Set the data to the buffer
-        genomeModesBuffer.SetData(modeData);
-        
-        // Set buffer and default mode index in the shader material
-        sphereMaterial.SetBuffer("genomeModesBuffer", genomeModesBuffer);
-        sphereMaterial.SetInt("defaultGenomeMode", GetInitialModeIndex());
-        
-        Debug.Log($"Updated genome modes buffer with {modeCount} modes");
-    }
     
-    // Helper to check if a position is valid
-    private bool IsValidPosition(Vector3 position)
-    {
-        return !float.IsNaN(position.x) && !float.IsNaN(position.y) && !float.IsNaN(position.z) &&
-               !float.IsInfinity(position.x) && !float.IsInfinity(position.y) && !float.IsInfinity(position.z);
-    }
+    #endregion
 }
