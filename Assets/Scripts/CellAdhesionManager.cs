@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using UnityEngine;
 
 public class CellAdhesionManager : MonoBehaviour
@@ -201,9 +202,7 @@ public class CellAdhesionManager : MonoBehaviour
             bond.zoneA = ClassifyBondDirection(posA, rotA, posB, splitYawA, splitPitchA);
             bond.zoneB = ClassifyBondDirection(posB, rotB, posA, splitYawB, splitPitchB);
         }
-    }
-
-    // Called by ParticleSystemController after a cell splits
+    }    // Called by ParticleSystemController after a cell splits
     public void HandleCellSplit(
         int parentIndex,
         int childAIndex,
@@ -218,15 +217,74 @@ public class CellAdhesionManager : MonoBehaviour
         bool childA_KeepAdhesion,
         bool childB_KeepAdhesion)
     {
-        // Use unique IDs for bonds to ensure correct cell identity
-        if (parentMakeAdhesion &&
-            particleSystemController != null &&
-            childAIndex >= 0 && childBIndex >= 0 &&
-            childAIndex < particleSystemController.ParticleIDs.Length &&
-            childBIndex < particleSystemController.ParticleIDs.Length)
+        if (particleSystemController == null || 
+            childAIndex < 0 || childBIndex < 0 ||
+            childAIndex >= particleSystemController.ParticleIDs.Length ||
+            childBIndex >= particleSystemController.ParticleIDs.Length)
+            return;
+          // Get uniqueIDs for the new cells
+        int uniqueA = particleSystemController.ParticleIDs[childAIndex].uniqueID;
+        int uniqueB = particleSystemController.ParticleIDs[childBIndex].uniqueID;
+        
+        // Get the parent's uniqueID - use the parentID from the children's records
+        // Since the parent is replaced by childA, the parentID of either child should be the uniqueID of their parent
+        int parentUniqueID = particleSystemController.ParticleIDs[childAIndex].parentID;
+        
+        // Find all bonds that involve the parent cell and transfer them to the child cells
+        List<AdhesionBond> parentBonds = new List<AdhesionBond>();
+        
+        // Collect all bonds that involved the parent (will be modified, so we need a separate collection)
+        foreach (var bond in bonds.ToList())
         {
-            int uniqueA = particleSystemController.ParticleIDs[childAIndex].uniqueID;
-            int uniqueB = particleSystemController.ParticleIDs[childBIndex].uniqueID;
+            // Check if this bond involves the parent cell
+            if (bond.cellA == parentUniqueID || bond.cellB == parentUniqueID)
+            {
+                parentBonds.Add(bond);
+                
+                // Optionally remove the parent's bond since the parent is now split
+                bonds.Remove(bond);
+            }
+        }
+          // Create new bonds between the children and the parent's neighbors
+        foreach (var parentBond in parentBonds)
+        {
+            int neighborID = (parentBond.cellA == parentUniqueID) ? parentBond.cellB : parentBond.cellA;
+            BondZone neighborZone = (parentBond.cellA == parentUniqueID) ? parentBond.zoneB : parentBond.zoneA;
+            BondZone parentZone = (parentBond.cellA == parentUniqueID) ? parentBond.zoneA : parentBond.zoneB;            // If the bond is in the inheritance zone, decide which child gets it or if it should be split
+            if (parentZone == BondZone.Inheritance)
+            {
+                // Both children want to keep the adhesion - both get a bond to the neighbor
+                if (childA_KeepAdhesion && childB_KeepAdhesion)
+                {
+                    AddBond(uniqueA, neighborID, BondZone.Inheritance, neighborZone);
+                    AddBond(uniqueB, neighborID, BondZone.Inheritance, neighborZone);
+                }
+                // Only Child A wants to keep the adhesion
+                else if (childA_KeepAdhesion)
+                {
+                    AddBond(uniqueA, neighborID, BondZone.Inheritance, neighborZone);
+                }
+                // Only Child B wants to keep the adhesion
+                else if (childB_KeepAdhesion)
+                {
+                    AddBond(uniqueB, neighborID, BondZone.Inheritance, neighborZone);
+                }
+            }
+            // If the bond is in Zone A, give it to Child A (if it keeps adhesion)
+            else if (parentZone == BondZone.ZoneA && childA_KeepAdhesion)
+            {
+                AddBond(uniqueA, neighborID, BondZone.Inheritance, neighborZone);
+            }
+            // If the bond is in Zone B, give it to Child B (if it keeps adhesion)
+            else if (parentZone == BondZone.ZoneB && childB_KeepAdhesion)
+            {
+                AddBond(uniqueB, neighborID, BondZone.Inheritance, neighborZone);
+            }
+        }
+        
+        // If parentMakeAdhesion is true, also create a bond between the two children
+        if (parentMakeAdhesion)
+        {
             AddBond(uniqueA, uniqueB, BondZone.Inheritance, BondZone.Inheritance);
         }
     }
