@@ -107,8 +107,8 @@ public class CellAdhesionManager : MonoBehaviour
             Vector3 posA = positions[idxA];
             Vector3 posB = positions[idxB];
             Vector3 midpoint = (posA + posB) * 0.5f;
-            Color colorA = bond.zoneA == BondZone.ZoneA ? zoneAColor : bond.zoneA == BondZone.ZoneB ? zoneBColor : zoneCColor;
-            Color colorB = bond.zoneB == BondZone.ZoneA ? zoneAColor : bond.zoneB == BondZone.ZoneB ? zoneBColor : zoneCColor;
+            Color colorA = bond.zoneA == BondZone.ZoneB ? zoneAColor : bond.zoneA == BondZone.ZoneA ? zoneBColor : zoneCColor;
+            Color colorB = bond.zoneB == BondZone.ZoneB ? zoneAColor : bond.zoneB == BondZone.ZoneA ? zoneBColor : zoneCColor;
             var goA = new GameObject($"Bond_{bond.cellA}_to_mid");
             var lrA = goA.AddComponent<LineRenderer>();
             lrA.positionCount = 2;
@@ -271,12 +271,12 @@ public class CellAdhesionManager : MonoBehaviour
                 }
             }
             // If the bond is in Zone A, give it to Child A (if it keeps adhesion)
-            else if (parentZone == BondZone.ZoneA && childA_KeepAdhesion)
+            else if (parentZone == BondZone.ZoneB && childA_KeepAdhesion)
             {
                 AddBond(uniqueA, neighborID, BondZone.ZoneC, neighborZone);
             }
             // If the bond is in Zone B, give it to Child B (if it keeps adhesion)
-            else if (parentZone == BondZone.ZoneB && childB_KeepAdhesion)
+            else if (parentZone == BondZone.ZoneA && childB_KeepAdhesion)
             {
                 AddBond(uniqueB, neighborID, BondZone.ZoneC, neighborZone);
             }
