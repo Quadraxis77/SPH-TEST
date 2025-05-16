@@ -9,7 +9,7 @@ public class CellAdhesionManager : MonoBehaviour
     public float bondWidth = 0.05f;
     public Color zoneAColor = Color.green;
     public Color zoneBColor = Color.blue;
-    public Color inheritanceZoneColor = Color.red;
+    public Color zoneCColor = Color.red;
 
     private List<AdhesionBond> bonds = new List<AdhesionBond>();
     private List<LineRenderer> bondLines = new List<LineRenderer>();
@@ -24,7 +24,7 @@ public class CellAdhesionManager : MonoBehaviour
         // Add more metadata as needed
     }
 
-    public enum BondZone { ZoneA, ZoneB, Inheritance }
+    public enum BondZone { ZoneA, ZoneB, ZoneC }
 
     void Awake()
     {
@@ -107,8 +107,8 @@ public class CellAdhesionManager : MonoBehaviour
             Vector3 posA = positions[idxA];
             Vector3 posB = positions[idxB];
             Vector3 midpoint = (posA + posB) * 0.5f;
-            Color colorA = bond.zoneA == BondZone.ZoneA ? zoneAColor : bond.zoneA == BondZone.ZoneB ? zoneBColor : inheritanceZoneColor;
-            Color colorB = bond.zoneB == BondZone.ZoneA ? zoneAColor : bond.zoneB == BondZone.ZoneB ? zoneBColor : inheritanceZoneColor;
+            Color colorA = bond.zoneA == BondZone.ZoneA ? zoneAColor : bond.zoneA == BondZone.ZoneB ? zoneBColor : zoneCColor;
+            Color colorB = bond.zoneB == BondZone.ZoneA ? zoneAColor : bond.zoneB == BondZone.ZoneB ? zoneBColor : zoneCColor;
             var goA = new GameObject($"Bond_{bond.cellA}_to_mid");
             var lrA = goA.AddComponent<LineRenderer>();
             lrA.positionCount = 2;
@@ -145,7 +145,7 @@ public class CellAdhesionManager : MonoBehaviour
         float halfWidth = inheritanceAngleDeg * 1f;
         float equatorialAngle = 90f;
         if (Mathf.Abs(angle - equatorialAngle) <= halfWidth)
-            return BondZone.Inheritance;
+            return BondZone.ZoneC;
         else if (dot > 0)
             return BondZone.ZoneB;
         else
@@ -251,41 +251,41 @@ public class CellAdhesionManager : MonoBehaviour
             int neighborID = (parentBond.cellA == parentUniqueID) ? parentBond.cellB : parentBond.cellA;
             BondZone neighborZone = (parentBond.cellA == parentUniqueID) ? parentBond.zoneB : parentBond.zoneA;
             BondZone parentZone = (parentBond.cellA == parentUniqueID) ? parentBond.zoneA : parentBond.zoneB;            // If the bond is in the inheritance zone, decide which child gets it or if it should be split
-            if (parentZone == BondZone.Inheritance)
+            if (parentZone == BondZone.ZoneC)
             {
                 // Both children want to keep the adhesion - both get a bond to the neighbor
                 if (childA_KeepAdhesion && childB_KeepAdhesion)
                 {
-                    AddBond(uniqueA, neighborID, BondZone.Inheritance, neighborZone);
-                    AddBond(uniqueB, neighborID, BondZone.Inheritance, neighborZone);
+                    AddBond(uniqueA, neighborID, BondZone.ZoneC, neighborZone);
+                    AddBond(uniqueB, neighborID, BondZone.ZoneC, neighborZone);
                 }
                 // Only Child A wants to keep the adhesion
                 else if (childA_KeepAdhesion)
                 {
-                    AddBond(uniqueA, neighborID, BondZone.Inheritance, neighborZone);
+                    AddBond(uniqueA, neighborID, BondZone.ZoneC, neighborZone);
                 }
                 // Only Child B wants to keep the adhesion
                 else if (childB_KeepAdhesion)
                 {
-                    AddBond(uniqueB, neighborID, BondZone.Inheritance, neighborZone);
+                    AddBond(uniqueB, neighborID, BondZone.ZoneC, neighborZone);
                 }
             }
             // If the bond is in Zone A, give it to Child A (if it keeps adhesion)
             else if (parentZone == BondZone.ZoneA && childA_KeepAdhesion)
             {
-                AddBond(uniqueA, neighborID, BondZone.Inheritance, neighborZone);
+                AddBond(uniqueA, neighborID, BondZone.ZoneC, neighborZone);
             }
             // If the bond is in Zone B, give it to Child B (if it keeps adhesion)
             else if (parentZone == BondZone.ZoneB && childB_KeepAdhesion)
             {
-                AddBond(uniqueB, neighborID, BondZone.Inheritance, neighborZone);
+                AddBond(uniqueB, neighborID, BondZone.ZoneC, neighborZone);
             }
         }
         
         // If parentMakeAdhesion is true, also create a bond between the two children
         if (parentMakeAdhesion)
         {
-            AddBond(uniqueA, uniqueB, BondZone.Inheritance, BondZone.Inheritance);
+            AddBond(uniqueA, uniqueB, BondZone.ZoneC, BondZone.ZoneC);
         }
     }
 }
