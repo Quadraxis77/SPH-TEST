@@ -21,6 +21,14 @@ public class CellAdhesionManager : MonoBehaviour
         public int cellB;
         public BondZone zoneA; // zone for cellA's end
         public BondZone zoneB; // zone for cellB's end
+        // Track if this bond is a direct Child-to-Child bond (exempt until either splits)
+        public bool isChildToChild = false;
+        // Store the unique IDs of the two children at bond creation
+        public int childAUniqueID;
+        public int childBUniqueID;
+        // Track the initial zone configuration when the bond was created
+        public BondZone initialZoneA;
+        public BondZone initialZoneB;
         // Add more metadata as needed
     }
 
@@ -45,7 +53,7 @@ public class CellAdhesionManager : MonoBehaviour
         UpdateBondVisuals();
     }
 
-    public void AddBond(int cellA, int cellB, BondZone zoneA, BondZone zoneB)
+    public void AddBond(int cellA, int cellB, BondZone zoneA, BondZone zoneB, bool isChildToChild = false, int childAUniqueID = -1, int childBUniqueID = -1)
     {
         // Prevent duplicate bonds (regardless of order)
         if (cellA == cellB || cellA < 0 || cellB < 0) return;
@@ -56,7 +64,12 @@ public class CellAdhesionManager : MonoBehaviour
             cellA = cellA,
             cellB = cellB,
             zoneA = zoneA,
-            zoneB = zoneB
+            zoneB = zoneB,
+            initialZoneA = zoneA, // Store initial zone configuration 
+            initialZoneB = zoneB,
+            isChildToChild = isChildToChild,
+            childAUniqueID = childAUniqueID,
+            childBUniqueID = childBUniqueID
         });
     }
 
@@ -98,12 +111,58 @@ public class CellAdhesionManager : MonoBehaviour
         }
         bondLines.Clear();
         var positions = particleSystemController.CpuParticlePositions;
+        var particleIDs = particleSystemController.ParticleIDs;
+
+        // Filter bonds as requested
         foreach (var bond in bonds)
         {
             int idxA = GetIndexForUniqueID(bond.cellA);
             int idxB = GetIndexForUniqueID(bond.cellB);
             if (idxA < 0 || idxB < 0 || idxA >= positions.Length || idxB >= positions.Length)
+            {
+                Debug.Log($"[BondFilter] Skipping bond ({bond.cellA},{bond.cellB}) due to invalid indices: idxA={idxA}, idxB={idxB}");
                 continue;
+            }
+            char typeA = (particleIDs != null && idxA < particleIDs.Length) ? particleIDs[idxA].childType : '\0';
+            char typeB = (particleIDs != null && idxB < particleIDs.Length) ? particleIDs[idxB].childType : '\0';
+            bool isSameType = (typeA == typeB) && (typeA == 'A' || typeA == 'B');
+            bool isExemptChildToChild = false;
+            if (bond.isChildToChild)
+            {
+                // Exempt if both original uniqueIDs are still present
+                bool foundA = false, foundB = false;
+                foreach (var pid in particleIDs)
+                {
+                    if (pid.uniqueID == bond.childAUniqueID) foundA = true;
+                    if (pid.uniqueID == bond.childBUniqueID) foundB = true;
+                }
+                isExemptChildToChild = foundA && foundB;
+            }
+            
+            // Check if the bond started as zoneC-zoneC
+            bool startedAsZoneC = (bond.initialZoneA == BondZone.ZoneC && bond.initialZoneB == BondZone.ZoneC);
+            string allowReason = null;
+            
+            if (startedAsZoneC)
+            {
+                // Apply strict filtering for bonds that started as zone C - zone C
+                if (isSameType) allowReason = "same child type (started as zone C)";
+                else if (isExemptChildToChild) allowReason = "valid sibling bond (started as zone C)";
+            }
+            else
+            {
+                // For bonds that didn't start as zone C - zone C, allow them regardless of types
+                allowReason = "bond did not start as zone C";
+            }
+
+            if (allowReason != null) {
+                Debug.Log($"[BondAllow] Allowing bond ({bond.cellA},{bond.cellB}) | typeA: {typeA}, typeB: {typeB}, isChildToChild: {bond.isChildToChild}, childAUniqueID: {bond.childAUniqueID}, childBUniqueID: {bond.childBUniqueID}, initialZoneA: {bond.initialZoneA}, initialZoneB: {bond.initialZoneB}, zoneA: {bond.zoneA}, zoneB: {bond.zoneB}, reason: {allowReason}");
+            } else {
+                Debug.Log($"[BondFilter] Filtering out bond ({bond.cellA},{bond.cellB}) | typeA: {typeA}, typeB: {typeB}, isChildToChild: {bond.isChildToChild}, childAUniqueID: {bond.childAUniqueID}, childBUniqueID: {bond.childBUniqueID}, initialZoneA: {bond.initialZoneA}, initialZoneB: {bond.initialZoneB}, zoneA: {bond.zoneA}, zoneB: {bond.zoneB}");
+                continue; // Filter out this bond
+            }
+
+            // Draw bond as before
             Vector3 posA = positions[idxA];
             Vector3 posB = positions[idxB];
             Vector3 midpoint = (posA + posB) * 0.5f;
@@ -252,40 +311,41 @@ public class CellAdhesionManager : MonoBehaviour
             BondZone neighborZone = (parentBond.cellA == parentUniqueID) ? parentBond.zoneB : parentBond.zoneA;
             BondZone parentZone = (parentBond.cellA == parentUniqueID) ? parentBond.zoneA : parentBond.zoneB;            // If the bond is in the inheritance zone, decide which child gets it or if it should be split
             if (parentZone == BondZone.ZoneC)
-            {
-                // Both children want to keep the adhesion - both get a bond to the neighbor
+            {                // Both children want to keep the adhesion - both get a bond to the neighbor
                 if (childA_KeepAdhesion && childB_KeepAdhesion)
                 {
-                    AddBond(uniqueA, neighborID, BondZone.ZoneC, neighborZone);
-                    AddBond(uniqueB, neighborID, BondZone.ZoneC, neighborZone);
+                    AddBond(uniqueA, neighborID, parentBond.zoneA, neighborZone);
+                    AddBond(uniqueB, neighborID, parentBond.zoneA, neighborZone);
                 }
                 // Only Child A wants to keep the adhesion
                 else if (childA_KeepAdhesion)
                 {
-                    AddBond(uniqueA, neighborID, BondZone.ZoneC, neighborZone);
+                    AddBond(uniqueA, neighborID, parentBond.zoneA, neighborZone);
                 }
                 // Only Child B wants to keep the adhesion
                 else if (childB_KeepAdhesion)
                 {
-                    AddBond(uniqueB, neighborID, BondZone.ZoneC, neighborZone);
+                    AddBond(uniqueB, neighborID, parentBond.zoneA, neighborZone);
                 }
-            }
-            // If the bond is in Zone A, give it to Child A (if it keeps adhesion)
+            }            // If the bond is in Zone A, give it to Child A (if it keeps adhesion)
             else if (parentZone == BondZone.ZoneB && childA_KeepAdhesion)
             {
-                AddBond(uniqueA, neighborID, BondZone.ZoneC, neighborZone);
+                // Keep the same zone type when transferring to children
+                AddBond(uniqueA, neighborID, BondZone.ZoneB, neighborZone);
             }
             // If the bond is in Zone B, give it to Child B (if it keeps adhesion)
             else if (parentZone == BondZone.ZoneA && childB_KeepAdhesion)
             {
-                AddBond(uniqueB, neighborID, BondZone.ZoneC, neighborZone);
+                // Keep the same zone type when transferring to children
+                AddBond(uniqueB, neighborID, BondZone.ZoneA, neighborZone);
             }
         }
         
         // If parentMakeAdhesion is true, also create a bond between the two children
         if (parentMakeAdhesion)
         {
-            AddBond(uniqueA, uniqueB, BondZone.ZoneC, BondZone.ZoneC);
+            // Mark as direct child-to-child bond, store unique IDs for exemption
+            AddBond(uniqueA, uniqueB, BondZone.ZoneC, BondZone.ZoneC, true, uniqueA, uniqueB);
         }
     }
 }
