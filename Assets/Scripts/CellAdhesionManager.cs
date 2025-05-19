@@ -29,6 +29,7 @@ public class CellAdhesionManager : MonoBehaviour
         // Track the initial zone configuration when the bond was created
         public BondZone initialZoneA;
         public BondZone initialZoneB;
+        public int creationFrame; // Track the frame when bond was created
         // Add more metadata as needed
     }
 
@@ -53,13 +54,22 @@ public class CellAdhesionManager : MonoBehaviour
         UpdateBondVisuals();
     }
 
+    // Helper class to hold LineRenderers for a bond
+    private class BondVisual
+    {
+        public LineRenderer lrA;
+        public LineRenderer lrB;
+    }
+    // Map bonds to visuals
+    private Dictionary<AdhesionBond, BondVisual> bondVisuals = new Dictionary<AdhesionBond, BondVisual>();
+
     public void AddBond(int cellA, int cellB, BondZone zoneA, BondZone zoneB, bool isChildToChild = false, int childAUniqueID = -1, int childBUniqueID = -1)
     {
         // Prevent duplicate bonds (regardless of order)
         if (cellA == cellB || cellA < 0 || cellB < 0) return;
         if (bonds.Exists(b => (b.cellA == cellA && b.cellB == cellB) || (b.cellA == cellB && b.cellB == cellA)))
             return;
-        bonds.Add(new AdhesionBond
+        var bond = new AdhesionBond
         {
             cellA = cellA,
             cellB = cellB,
@@ -69,18 +79,153 @@ public class CellAdhesionManager : MonoBehaviour
             initialZoneB = zoneB,
             isChildToChild = isChildToChild,
             childAUniqueID = childAUniqueID,
-            childBUniqueID = childBUniqueID
-        });
+            childBUniqueID = childBUniqueID,
+            creationFrame = Time.frameCount // Set creation frame
+        };
+        bonds.Add(bond);
+        // Create visuals for this bond
+        CreateBondVisual(bond);
     }
 
     public void ClearBonds()
     {
         bonds.Clear();
-        foreach (var lr in bondLines)
+        foreach (var vis in bondVisuals.Values)
         {
-            if (lr != null) Destroy(lr.gameObject);
+            if (vis.lrA != null) Destroy(vis.lrA.gameObject);
+            if (vis.lrB != null) Destroy(vis.lrB.gameObject);
         }
+        bondVisuals.Clear();
         bondLines.Clear();
+    }
+
+    private void CreateBondVisual(AdhesionBond bond)
+    {
+        // Create two LineRenderers for the bond
+        var goA = new GameObject($"Bond_{bond.cellA}_to_mid");
+        var lrA = goA.AddComponent<LineRenderer>();
+        lrA.positionCount = 2;
+        lrA.startWidth = bondWidth;
+        lrA.endWidth = bondWidth;
+        lrA.material = bondMaterial != null ? bondMaterial : new Material(Shader.Find("Sprites/Default"));
+        var goB = new GameObject($"Bond_mid_to_{bond.cellB}");
+        var lrB = goB.AddComponent<LineRenderer>();
+        lrB.positionCount = 2;
+        lrB.startWidth = bondWidth;
+        lrB.endWidth = bondWidth;
+        lrB.material = bondMaterial != null ? bondMaterial : new Material(Shader.Find("Sprites/Default"));
+        bondVisuals[bond] = new BondVisual { lrA = lrA, lrB = lrB };
+        bondLines.Add(lrA);
+        bondLines.Add(lrB);
+    }
+
+    private void RemoveBondVisual(AdhesionBond bond)
+    {
+        if (bondVisuals.TryGetValue(bond, out var vis))
+        {
+            if (vis.lrA != null) Destroy(vis.lrA.gameObject);
+            if (vis.lrB != null) Destroy(vis.lrB.gameObject);
+            bondVisuals.Remove(bond);
+            bondLines.Remove(vis.lrA);
+            bondLines.Remove(vis.lrB);
+        }
+    }
+
+    private void FilterBonds()
+    {
+        if (bonds.Count == 0 || particleSystemController == null)
+            return;
+        var bondPositions = particleSystemController.CpuParticlePositions;
+        var toRemove = new HashSet<AdhesionBond>();
+        // For each bond end (cell, zone), find all bonds where this is an end, and if more than one, keep only shortest
+        // 1. For cellA ends
+        var groupA = bonds
+            .Where(b => b.creationFrame < Time.frameCount)
+            .GroupBy(b => (b.cellA, b.zoneA));
+        foreach (var group in groupA)
+        {
+            if (group.Count() > 1)
+            {
+                var shortest = group.OrderBy(b =>
+                {
+                    int idxA = GetIndexForUniqueID(b.cellA);
+                    int idxB = GetIndexForUniqueID(b.cellB);
+                    if (idxA < 0 || idxB < 0 || idxA >= bondPositions.Length || idxB >= bondPositions.Length) return float.MaxValue;
+                    return Vector3.Distance(bondPositions[idxA], bondPositions[idxB]);
+                }).First();
+                foreach (var b in group)
+                    if (b != shortest) toRemove.Add(b);
+            }
+        }
+        // 2. For cellB ends
+        var groupB = bonds
+            .Where(b => b.creationFrame < Time.frameCount)
+            .GroupBy(b => (b.cellB, b.zoneB));
+        foreach (var group in groupB)
+        {
+            if (group.Count() > 1)
+            {
+                var shortest = group.OrderBy(b =>
+                {
+                    int idxA = GetIndexForUniqueID(b.cellA);
+                    int idxB = GetIndexForUniqueID(b.cellB);
+                    if (idxA < 0 || idxB < 0 || idxA >= bondPositions.Length || idxB >= bondPositions.Length) return float.MaxValue;
+                    return Vector3.Distance(bondPositions[idxA], bondPositions[idxB]);
+                }).First();
+                foreach (var b in group)
+                    if (b != shortest) toRemove.Add(b);
+            }
+        }
+        if (toRemove.Count > 0)
+        {
+            foreach (var b in toRemove)
+                RemoveBondVisual(b);
+            bonds.RemoveAll(b => toRemove.Contains(b));
+        }
+    }
+
+    private void UpdateBondVisuals()
+    {
+        if (particleSystemController == null)
+        {
+            Debug.LogError("[CellAdhesionManager] particleSystemController is null. Bonds cannot be visualized.");
+            return;
+        }
+        UpdateBondZones();
+        FilterBonds();
+        // Remove visuals for bonds that no longer exist
+        var bondsToRemove = bondVisuals.Keys.Except(bonds).ToList();
+        foreach (var bond in bondsToRemove)
+            RemoveBondVisual(bond);
+        // Add visuals for new bonds
+        foreach (var bond in bonds)
+        {
+            if (!bondVisuals.ContainsKey(bond))
+                CreateBondVisual(bond);
+        }
+        var positions = particleSystemController.CpuParticlePositions;
+        // Update positions/colors for all visuals
+        foreach (var bond in bonds)
+        {
+            int idxA = GetIndexForUniqueID(bond.cellA);
+            int idxB = GetIndexForUniqueID(bond.cellB);
+            if (idxA < 0 || idxB < 0 || idxA >= positions.Length || idxB >= positions.Length)
+                continue;
+            Vector3 posA = positions[idxA];
+            Vector3 posB = positions[idxB];
+            Vector3 midpoint = (posA + posB) * 0.5f;
+            Color colorA = bond.zoneA == BondZone.ZoneB ? zoneAColor : bond.zoneA == BondZone.ZoneA ? zoneBColor : zoneCColor;
+            Color colorB = bond.zoneB == BondZone.ZoneB ? zoneAColor : bond.zoneB == BondZone.ZoneA ? zoneBColor : zoneCColor;
+            var vis = bondVisuals[bond];
+            vis.lrA.SetPosition(0, posA);
+            vis.lrA.SetPosition(1, midpoint);
+            vis.lrA.startColor = colorA;
+            vis.lrA.endColor = colorA;
+            vis.lrB.SetPosition(0, midpoint);
+            vis.lrB.SetPosition(1, posB);
+            vis.lrB.startColor = colorB;
+            vis.lrB.endColor = colorB;
+        }
     }
 
     // Helper to map uniqueID to current array index
@@ -95,102 +240,6 @@ public class CellAdhesionManager : MonoBehaviour
                 return i;
         }
         return -1;
-    }
-
-    private void UpdateBondVisuals()
-    {
-        if (particleSystemController == null)
-        {
-            Debug.LogError("[CellAdhesionManager] particleSystemController is null. Bonds cannot be visualized.");
-            return;
-        }
-        UpdateBondZones();
-        foreach (var lr in bondLines)
-        {
-            if (lr != null) Destroy(lr.gameObject);
-        }
-        bondLines.Clear();
-        var positions = particleSystemController.CpuParticlePositions;
-        var particleIDs = particleSystemController.ParticleIDs;
-
-        // Filter bonds as requested
-        foreach (var bond in bonds)
-        {
-            int idxA = GetIndexForUniqueID(bond.cellA);
-            int idxB = GetIndexForUniqueID(bond.cellB);
-            if (idxA < 0 || idxB < 0 || idxA >= positions.Length || idxB >= positions.Length)
-            {
-                Debug.Log($"[BondFilter] Skipping bond ({bond.cellA},{bond.cellB}) due to invalid indices: idxA={idxA}, idxB={idxB}");
-                continue;
-            }
-            char typeA = (particleIDs != null && idxA < particleIDs.Length) ? particleIDs[idxA].childType : '\0';
-            char typeB = (particleIDs != null && idxB < particleIDs.Length) ? particleIDs[idxB].childType : '\0';
-            bool isSameType = (typeA == typeB) && (typeA == 'A' || typeA == 'B');
-            bool isExemptChildToChild = false;
-            if (bond.isChildToChild)
-            {
-                // Exempt if both original uniqueIDs are still present
-                bool foundA = false, foundB = false;
-                foreach (var pid in particleIDs)
-                {
-                    if (pid.uniqueID == bond.childAUniqueID) foundA = true;
-                    if (pid.uniqueID == bond.childBUniqueID) foundB = true;
-                }
-                isExemptChildToChild = foundA && foundB;
-            }
-            
-            // Check if the bond started as zoneC-zoneC
-            bool startedAsZoneC = (bond.initialZoneA == BondZone.ZoneC && bond.initialZoneB == BondZone.ZoneC);
-            string allowReason = null;
-            
-            if (startedAsZoneC)
-            {
-                // Apply strict filtering for bonds that started as zone C - zone C
-                if (isSameType) allowReason = "same child type (started as zone C)";
-                else if (isExemptChildToChild) allowReason = "valid sibling bond (started as zone C)";
-            }
-            else
-            {
-                // For bonds that didn't start as zone C - zone C, allow them regardless of types
-                allowReason = "bond did not start as zone C";
-            }
-
-            if (allowReason != null) {
-                Debug.Log($"[BondAllow] Allowing bond ({bond.cellA},{bond.cellB}) | typeA: {typeA}, typeB: {typeB}, isChildToChild: {bond.isChildToChild}, childAUniqueID: {bond.childAUniqueID}, childBUniqueID: {bond.childBUniqueID}, initialZoneA: {bond.initialZoneA}, initialZoneB: {bond.initialZoneB}, zoneA: {bond.zoneA}, zoneB: {bond.zoneB}, reason: {allowReason}");
-            } else {
-                Debug.Log($"[BondFilter] Filtering out bond ({bond.cellA},{bond.cellB}) | typeA: {typeA}, typeB: {typeB}, isChildToChild: {bond.isChildToChild}, childAUniqueID: {bond.childAUniqueID}, childBUniqueID: {bond.childBUniqueID}, initialZoneA: {bond.initialZoneA}, initialZoneB: {bond.initialZoneB}, zoneA: {bond.zoneA}, zoneB: {bond.zoneB}");
-                continue; // Filter out this bond
-            }
-
-            // Draw bond as before
-            Vector3 posA = positions[idxA];
-            Vector3 posB = positions[idxB];
-            Vector3 midpoint = (posA + posB) * 0.5f;
-            Color colorA = bond.zoneA == BondZone.ZoneB ? zoneAColor : bond.zoneA == BondZone.ZoneA ? zoneBColor : zoneCColor;
-            Color colorB = bond.zoneB == BondZone.ZoneB ? zoneAColor : bond.zoneB == BondZone.ZoneA ? zoneBColor : zoneCColor;
-            var goA = new GameObject($"Bond_{bond.cellA}_to_mid");
-            var lrA = goA.AddComponent<LineRenderer>();
-            lrA.positionCount = 2;
-            lrA.SetPosition(0, posA);
-            lrA.SetPosition(1, midpoint);
-            lrA.startWidth = bondWidth;
-            lrA.endWidth = bondWidth;
-            lrA.material = bondMaterial != null ? bondMaterial : new Material(Shader.Find("Sprites/Default"));
-            lrA.startColor = colorA;
-            lrA.endColor = colorA;
-            bondLines.Add(lrA);
-            var goB = new GameObject($"Bond_mid_to_{bond.cellB}");
-            var lrB = goB.AddComponent<LineRenderer>();
-            lrB.positionCount = 2;
-            lrB.SetPosition(0, midpoint);
-            lrB.SetPosition(1, posB);
-            lrB.startWidth = bondWidth;
-            lrB.endWidth = bondWidth;
-            lrB.material = bondMaterial != null ? bondMaterial : new Material(Shader.Find("Sprites/Default"));
-            lrB.startColor = colorB;
-            lrB.endColor = colorB;
-            bondLines.Add(lrB);
-        }
     }
 
     public BondZone ClassifyBondDirection(Vector3 cellPos, Quaternion cellRot, Vector3 otherPos, float splitYaw, float splitPitch, float inheritanceAngleDeg = 10f)
@@ -234,6 +283,9 @@ public class CellAdhesionManager : MonoBehaviour
         };
         foreach (var bond in bonds)
         {
+            // Skip updating bonds more than 2 frames after creation
+            if (Time.frameCount > bond.creationFrame + 2)
+                continue;
             int idxA = GetIndexForUniqueID(bond.cellA);
             int idxB = GetIndexForUniqueID(bond.cellB);
             if (idxA < 0 || idxB < 0 || idxA >= positions.Length || idxB >= positions.Length ||
