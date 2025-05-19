@@ -144,6 +144,10 @@ public class CellAdhesionManager : MonoBehaviour
             .GroupBy(b => (b.cellA, b.zoneA));
         foreach (var group in groupA)
         {
+            // Skip filtering if any bond in the group is half in ZoneC and half in ZoneA or ZoneB
+            if (group.Any(b => (b.zoneA == BondZone.ZoneC && (b.zoneB == BondZone.ZoneA || b.zoneB == BondZone.ZoneB)) ||
+                               ((b.zoneA == BondZone.ZoneA || b.zoneA == BondZone.ZoneB) && b.zoneB == BondZone.ZoneC)))
+                continue;
             if (group.Count() > 1)
             {
                 var shortest = group.OrderBy(b =>
@@ -163,6 +167,10 @@ public class CellAdhesionManager : MonoBehaviour
             .GroupBy(b => (b.cellB, b.zoneB));
         foreach (var group in groupB)
         {
+            // Skip filtering if any bond in the group is half in ZoneC and half in ZoneA or ZoneB
+            if (group.Any(b => (b.zoneB == BondZone.ZoneC && (b.zoneA == BondZone.ZoneA || b.zoneA == BondZone.ZoneB)) ||
+                               ((b.zoneB == BondZone.ZoneA || b.zoneB == BondZone.ZoneB) && b.zoneA == BondZone.ZoneC)))
+                continue;
             if (group.Count() > 1)
             {
                 var shortest = group.OrderBy(b =>
