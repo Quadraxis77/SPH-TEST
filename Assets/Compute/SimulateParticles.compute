@@ -7,6 +7,8 @@
 #pragma kernel UpdateRotation
 #pragma kernel CopyPositionsToReadbackBuffer
 #pragma kernel CopyRotationsToReadbackBuffer
+#pragma kernel ApplyAdhesionConstraints
+#pragma kernel ApplyAdhesionDeltas
 
 #pragma target 5.0
 
@@ -15,6 +17,7 @@
 #define GRID_CELL_SIZE 4.0f
 #define GRID_TOTAL (GRID_DIM * GRID_DIM * GRID_DIM)
 #define TORQUE_SCALE 10000
+#define ADHESION_DELTA_SCALE 1000000
 
 // ✅ 80-byte aligned Particle struct
 struct Particle {
@@ -44,6 +47,7 @@ struct AdhesionConnection {
     float springStiffness;
     float springDamping;
     float4 connectionColor; // RGBA
+    float4 initialRelOrientation; // New: relative orientation from A to B at bond creation
 };
 
 // Simplified data struct without adhesion properties
@@ -74,6 +78,9 @@ StructuredBuffer<DragInput> dragInput;
 RWStructuredBuffer<uint> gridHeads;
 RWStructuredBuffer<uint> gridNext;
 RWStructuredBuffer<uint> gridParticleIndices;
+
+RWStructuredBuffer<int3> adhesionVelocityDeltaBuffer;
+RWStructuredBuffer<int4> adhesionRotationDeltaBuffer;
 
 float deltaTime;
 float spawnRadius;
@@ -396,4 +403,84 @@ void CopyRotationsToReadbackBuffer(uint id : SV_DispatchThreadID)
 {
     if (id >= (uint)particleBuffer.Length || id >= (uint)activeParticleCount) return;
     rotationReadbackBuffer[id] = particleBuffer[id].rotation;
+}
+
+[numthreads(1, 1, 1)]
+void ApplyAdhesionConstraints(uint id : SV_DispatchThreadID)
+{
+    if ((int)id >= (int)adhesionConnectionCount) return;
+    AdhesionConnection conn = adhesionConnectionBuffer[id];
+    int idxA = conn.particleA;
+    int idxB = conn.particleB;
+    int particleCount = (int)particleBuffer.Length;
+    if (idxA < 0 || idxB < 0 || idxA >= particleCount || idxB >= particleCount) return;
+    Particle pA = particleBuffer[idxA];
+    Particle pB = particleBuffer[idxB];
+
+    // --- Spring (distance) constraint ---
+    float3 delta = pB.position - pA.position;
+    float dist = length(delta);
+    if (dist > 1e-6)
+    {
+        float3 dir = delta / dist;
+        float displacement = dist - conn.restLength;
+        // Apply 5x stronger spring force for more noticeable effect
+        float springMultiplier = 5.0;
+        float3 force = dir * (displacement * conn.springStiffness * springMultiplier);
+        float3 relVel = pB.velocity - pA.velocity;
+        float dampingForce = dot(relVel, dir) * conn.springDamping;
+        force += dir * dampingForce;
+        float3 deltaVA = force / pA.mass * deltaTime;
+        float3 deltaVB = -force / pB.mass * deltaTime;
+        int3 scaledA = (int3)round(deltaVA * ADHESION_DELTA_SCALE);
+        int3 scaledB = (int3)round(deltaVB * ADHESION_DELTA_SCALE);
+        InterlockedAdd(adhesionVelocityDeltaBuffer[idxA].x, scaledA.x);
+        InterlockedAdd(adhesionVelocityDeltaBuffer[idxA].y, scaledA.y);
+        InterlockedAdd(adhesionVelocityDeltaBuffer[idxA].z, scaledA.z);
+        InterlockedAdd(adhesionVelocityDeltaBuffer[idxB].x, scaledB.x);
+        InterlockedAdd(adhesionVelocityDeltaBuffer[idxB].y, scaledB.y);
+        InterlockedAdd(adhesionVelocityDeltaBuffer[idxB].z, scaledB.z);
+    }    // --- Orientation constraint (keep relative orientation fixed) ---
+    float4 rotA = pA.rotation;
+    float4 rotB = pB.rotation;
+    float4 rel = conn.initialRelOrientation;
+    float4 targetRotB = quat_mul(rotA, rel);
+    float orientationStiffness = 30.0f; // Increased from 10.0 to 30.0 for stronger effect
+    float t = saturate(orientationStiffness * deltaTime);
+    float4 newRotB = normalize(lerp(rotB, targetRotB, t));
+    float4 rotDelta = newRotB - rotB;
+    // DEBUG: Write out diagnostic values to a buffer (if available)
+    // (You may need to add a debug buffer to the shader and C# to read these values on the CPU)
+    int4 scaledRot = (int4)round(rotDelta * ADHESION_DELTA_SCALE);
+    InterlockedAdd(adhesionRotationDeltaBuffer[idxB].x, scaledRot.x);
+    InterlockedAdd(adhesionRotationDeltaBuffer[idxB].y, scaledRot.y);
+    InterlockedAdd(adhesionRotationDeltaBuffer[idxB].z, scaledRot.z);
+    InterlockedAdd(adhesionRotationDeltaBuffer[idxB].w, scaledRot.w);
+}
+
+[numthreads(THREADS, 1, 1)]
+void ApplyAdhesionDeltas(uint id : SV_DispatchThreadID)
+{
+    if (id >= (uint)particleBuffer.Length || id >= (uint)activeParticleCount) return;
+    Particle p = particleBuffer[id];
+    
+    // Get deltas and convert from int to float
+    int3 rawVDelta = adhesionVelocityDeltaBuffer[id];
+    int4 rawRDelta = adhesionRotationDeltaBuffer[id];
+    
+    // Scaling back to float values
+    float3 vDelta = (float3)rawVDelta / ADHESION_DELTA_SCALE;
+    float4 rDelta = (float4)rawRDelta / ADHESION_DELTA_SCALE;
+    
+    // Apply stronger constraint effect for debugging
+    float constraintMultiplier = 10.0;
+    p.velocity += vDelta * constraintMultiplier;
+    
+    // Apply rotation delta (don't multiply by constraintMultiplier to avoid over-rotation)
+    p.rotation = normalize(p.rotation + rDelta);
+    
+    // Write back and reset deltas
+    particleBuffer[id] = p;
+    adhesionVelocityDeltaBuffer[id] = int3(0,0,0);
+    adhesionRotationDeltaBuffer[id] = int4(0,0,0,0);
 }

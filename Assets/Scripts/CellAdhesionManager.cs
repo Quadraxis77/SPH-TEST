@@ -30,6 +30,7 @@ public class CellAdhesionManager : MonoBehaviour
         public BondZone initialZoneA;
         public BondZone initialZoneB;
         public int creationFrame; // Track the frame when bond was created
+        public Quaternion initialRelOrientation; // New: relative orientation from A to B at bond creation
         // Add more metadata as needed
     }
 
@@ -52,6 +53,7 @@ public class CellAdhesionManager : MonoBehaviour
     void LateUpdate()
     {
         UpdateBondVisuals();
+        // EnforceSpringWithOrientation(); // Removed: now handled on GPU
     }
 
     // Helper class to hold LineRenderers for a bond
@@ -80,8 +82,21 @@ public class CellAdhesionManager : MonoBehaviour
             isChildToChild = isChildToChild,
             childAUniqueID = childAUniqueID,
             childBUniqueID = childBUniqueID,
-            creationFrame = Time.frameCount // Set creation frame
+            creationFrame = Time.frameCount, // Set creation frame
+            initialRelOrientation = Quaternion.identity // Will be set below
         };
+        // Set initial relative orientation if possible
+        if (particleSystemController != null && particleSystemController.CpuParticleRotations != null)
+        {
+            int idxA = GetIndexForUniqueID(cellA);
+            int idxB = GetIndexForUniqueID(cellB);
+            if (idxA >= 0 && idxB >= 0 && idxA < particleSystemController.CpuParticleRotations.Length && idxB < particleSystemController.CpuParticleRotations.Length)
+            {
+                Quaternion rotA = particleSystemController.CpuParticleRotations[idxA];
+                Quaternion rotB = particleSystemController.CpuParticleRotations[idxB];
+                bond.initialRelOrientation = Quaternion.Inverse(rotA) * rotB;
+            }
+        }
         bonds.Add(bond);
         // Create visuals for this bond
         CreateBondVisual(bond);
@@ -407,5 +422,56 @@ public class CellAdhesionManager : MonoBehaviour
             // Mark as direct child-to-child bond, store unique IDs for exemption
             AddBond(uniqueA, uniqueB, BondZone.ZoneC, BondZone.ZoneC, true, uniqueA, uniqueB);
         }
+    }
+    // Export all current bonds as an array of structs for the compute shader
+    public struct AdhesionConnectionExport
+    {
+        public int particleA;
+        public int particleB;
+        public float restLength;
+        public float springStiffness;
+        public float springDamping;
+        public Vector4 color;
+        public Vector4 initialRelOrientation; // New: relative orientation as float4
+    }
+
+    public AdhesionConnectionExport[] GetAdhesionConnectionsForGPU()
+    {
+        Debug.Log($"[AdhesionManager] bonds.Count = {bonds.Count}");
+        if (particleSystemController == null) return new AdhesionConnectionExport[0];
+        var ids = particleSystemController.ParticleIDs;
+        var genome = particleSystemController.genome;
+        var result = new List<AdhesionConnectionExport>();
+        foreach (var bond in bonds)
+        {
+            int idxA = GetIndexForUniqueID(bond.cellA);
+            int idxB = GetIndexForUniqueID(bond.cellB);
+            if (idxA < 0 || idxB < 0) continue;
+            int modeA = 0;
+            if (ids != null && idxA < ids.Length && genome != null && genome.modes.Count > 0)
+                modeA = particleSystemController.ParticleIDs[idxA].uniqueID % genome.modes.Count;
+            float restLength = 2.0f;
+            float springStiffness = 100f;
+            float springDamping = 5f;
+            Vector4 color = new Vector4(1,1,1,1);
+            if (genome != null && modeA < genome.modes.Count)
+            {
+                restLength = genome.modes[modeA].adhesionRestLength;
+                springStiffness = genome.modes[modeA].adhesionSpringStiffness;
+                springDamping = genome.modes[modeA].adhesionSpringDamping;
+                color = genome.modes[modeA].modeColor;
+            }
+            result.Add(new AdhesionConnectionExport {
+                particleA = idxA,
+                particleB = idxB,
+                restLength = restLength,
+                springStiffness = springStiffness,
+                springDamping = springDamping,
+                color = color,
+                initialRelOrientation = new Vector4(bond.initialRelOrientation.x, bond.initialRelOrientation.y, bond.initialRelOrientation.z, bond.initialRelOrientation.w)
+            });
+        }
+        Debug.Log($"[AdhesionManager] Exporting {result.Count} adhesion connections to GPU");
+        return result.ToArray();
     }
 }

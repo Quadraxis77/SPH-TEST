@@ -66,6 +66,9 @@ public class ParticleSystemController : MonoBehaviour
     ComputeBuffer positionReadbackBuffer, rotationReadbackBuffer;
     ComputeBuffer gridHeads, gridNext, gridParticleIndices;
     ComputeBuffer torqueAccumBuffer;
+    ComputeBuffer adhesionConnectionBuffer;
+    ComputeBuffer adhesionVelocityDeltaBuffer;
+    ComputeBuffer adhesionRotationDeltaBuffer;
 
     const int GRID_DIM = 32;
     const int GRID_TOTAL = GRID_DIM * GRID_DIM * GRID_DIM;
@@ -77,8 +80,9 @@ public class ParticleSystemController : MonoBehaviour
     int kernelApplyDrag;
     int kernelUpdateMotion;
     int kernelUpdateRotation;
-    int kernelCopyPositions;
-    int kernelCopyRotations;
+    int kernelCopyPositions;    int kernelCopyRotations;
+    int kernelApplyAdhesionConstraints;
+    int kernelApplyAdhesionDeltas;
 
     int selectedParticleID = -1;
     Vector3 dragTargetWorld;
@@ -120,6 +124,9 @@ public class ParticleSystemController : MonoBehaviour
     // Add a field to track the most recently dragged/selected cell
     private int lastSelectedParticleID = -1;
     public int LastSelectedParticleID => lastSelectedParticleID;
+    
+    // Maximum number of adhesion connections (arbitrary limit for now)
+    int maxAdhesionConnections = 4096;
     
     #endregion
 
@@ -239,6 +246,8 @@ public class ParticleSystemController : MonoBehaviour
 
     void Update()
     {
+        Debug.unityLogger.logEnabled = true;
+        Debug.Log("Update running");
         float dt = Time.deltaTime;
         int threadGroups = Mathf.CeilToInt(particleCount / 64f);
 
@@ -279,6 +288,63 @@ public class ParticleSystemController : MonoBehaviour
         computeShader.SetBuffer(kernelApplySPHForces, "torqueAccumBuffer", torqueAccumBuffer);
         computeShader.Dispatch(kernelApplySPHForces, threadGroups, 1, 1);
 
+        // --- Apply adhesion constraints immediately after SPH forces ---
+        if (adhesionManager == null)
+        {
+            Debug.LogWarning("adhesionManager is null in Update()");
+        }
+        if (adhesionConnectionBuffer == null)
+        {
+            Debug.LogWarning("adhesionConnectionBuffer is null in Update()");
+        }
+        if (adhesionManager != null && adhesionConnectionBuffer != null)
+        {
+            var connections = adhesionManager.GetAdhesionConnectionsForGPU();
+            int count = Mathf.Min(connections.Length, maxAdhesionConnections);
+            Debug.Log($"Applying {count} adhesion connections to GPU");
+            
+            if (count > 0)
+            {
+                // Log the first few connections for debugging
+                for (int i = 0; i < Mathf.Min(count, 3); i++)
+                {
+                    var conn = connections[i];
+                    Debug.Log($"  Bond {i}: particles {conn.particleA}->{conn.particleB}, " + 
+                        $"rest={conn.restLength:F2}, stiffness={conn.springStiffness:F2}, damping={conn.springDamping:F2}");
+                }
+
+                adhesionConnectionBuffer.SetData(connections, 0, 0, count);
+                // Clear delta buffers
+                adhesionVelocityDeltaBuffer.SetData(new int[particleCount * 3]);
+                adhesionRotationDeltaBuffer.SetData(new int[particleCount * 4]);
+
+                computeShader.SetBuffer(kernelApplyAdhesionConstraints, "adhesionConnectionBuffer", adhesionConnectionBuffer);
+                computeShader.SetInt("adhesionConnectionCount", count);
+                computeShader.SetBuffer(kernelApplyAdhesionConstraints, "particleBuffer", particleBuffer);
+                computeShader.SetBuffer(kernelApplyAdhesionConstraints, "adhesionVelocityDeltaBuffer", adhesionVelocityDeltaBuffer);
+                computeShader.SetBuffer(kernelApplyAdhesionConstraints, "adhesionRotationDeltaBuffer", adhesionRotationDeltaBuffer);
+                // Explicitly set deltaTime for the adhesion constraints kernel
+                computeShader.SetFloat("deltaTime", dt);
+                computeShader.Dispatch(kernelApplyAdhesionConstraints, count, 1, 1);
+                  // Apply deltas to each particle
+                computeShader.SetBuffer(kernelApplyAdhesionDeltas, "particleBuffer", particleBuffer);
+                computeShader.SetBuffer(kernelApplyAdhesionDeltas, "adhesionVelocityDeltaBuffer", adhesionVelocityDeltaBuffer);
+                computeShader.SetBuffer(kernelApplyAdhesionDeltas, "adhesionRotationDeltaBuffer", adhesionRotationDeltaBuffer);
+                computeShader.SetFloat("deltaTime", dt);
+                computeShader.Dispatch(kernelApplyAdhesionDeltas, threadGroups, 1, 1);
+                  // Debug: Check output of the delta application
+                Particle[] debugParticles = new Particle[Mathf.Min(particleCount, 10)];
+                particleBuffer.GetData(debugParticles, 0, 0, debugParticles.Length);
+                Debug.Log($"After applying deltas: First few particles: " + 
+                    $"Pos[0]={debugParticles[0].position}, Vel[0]={debugParticles[0].velocity}");
+            }
+            else
+            {
+                Debug.Log("No adhesion connections to apply; skipping adhesion constraint kernels.");
+            }
+        }
+        // --- End adhesion constraints ---
+
         computeShader.SetBuffer(kernelApplyDrag, "particleBuffer", particleBuffer);
         computeShader.SetBuffer(kernelApplyDrag, "dragInput", dragInputBuffer);
         HandleMouseDrag();
@@ -313,7 +379,8 @@ public class ParticleSystemController : MonoBehaviour
         Graphics.DrawMeshInstancedIndirect(
             sphereMesh, 0, sphereMaterial,
             new Bounds(Vector3.zero, Vector3.one * spawnRadius * 2f),
-            drawArgsBufferSpheres);        UpdateDragVisualization();
+            drawArgsBufferSpheres);
+        UpdateDragVisualization();
         UpdateParticleLabels();  // refresh labels
         UpdateSplitPlaneRings(); // update split plane rings
     }    // UpdateAdhesionConnectionsVisual method has been removed as part of bond removal
@@ -361,9 +428,10 @@ public class ParticleSystemController : MonoBehaviour
         kernelApplySPHForces    = computeShader.FindKernel("ApplySPHForces");
         kernelApplyDrag         = computeShader.FindKernel("ApplyDragForce");
         kernelUpdateMotion      = computeShader.FindKernel("UpdateMotion");
-        kernelUpdateRotation    = computeShader.FindKernel("UpdateRotation");
-        kernelCopyPositions     = computeShader.FindKernel("CopyPositionsToReadbackBuffer");
+        kernelUpdateRotation    = computeShader.FindKernel("UpdateRotation");        kernelCopyPositions     = computeShader.FindKernel("CopyPositionsToReadbackBuffer");
         kernelCopyRotations     = computeShader.FindKernel("CopyRotationsToReadbackBuffer");
+        kernelApplyAdhesionConstraints = computeShader.FindKernel("ApplyAdhesionConstraints");
+        kernelApplyAdhesionDeltas = computeShader.FindKernel("ApplyAdhesionDeltas");
 
         uint[] args = new uint[5]
         {
@@ -394,6 +462,27 @@ public class ParticleSystemController : MonoBehaviour
         lineRenderer.material = new Material(Shader.Find("Sprites/Default"));
         lineRenderer.material.color = dragCircleColor;
         lineRenderer.enabled = false;
+
+        // --- Ensure adhesionConnectionBuffer is allocated ---
+        if (adhesionConnectionBuffer != null)
+        {
+            adhesionConnectionBuffer.Release();
+        }
+        // Each bond is a struct of 48 bytes (int, int, float, float, float, float4, float4)
+        adhesionConnectionBuffer = new ComputeBuffer(maxAdhesionConnections, sizeof(int) * 2 + sizeof(float) * 3 + sizeof(float) * 4 + sizeof(float) * 4);
+
+        // --- Ensure adhesionVelocityDeltaBuffer and adhesionRotationDeltaBuffer are allocated ---
+        if (adhesionVelocityDeltaBuffer != null)
+        {
+            adhesionVelocityDeltaBuffer.Release();
+        }
+        adhesionVelocityDeltaBuffer = new ComputeBuffer(particleCount * 3, sizeof(int));
+
+        if (adhesionRotationDeltaBuffer != null)
+        {
+            adhesionRotationDeltaBuffer.Release();
+        }
+        adhesionRotationDeltaBuffer = new ComputeBuffer(particleCount * 4, sizeof(int));
     }
 
     private void ReleaseBuffers()
@@ -407,7 +496,12 @@ public class ParticleSystemController : MonoBehaviour
         gridNext?.Release();
         gridParticleIndices?.Release();
         torqueAccumBuffer?.Release();
-        genomeModesBuffer?.Release(); // Release the genome modes buffer        if (circleRenderer != null) Destroy(circleRenderer.gameObject);
+        genomeModesBuffer?.Release(); // Release the genome modes buffer
+        adhesionConnectionBuffer?.Release();
+        adhesionVelocityDeltaBuffer?.Release();
+        adhesionRotationDeltaBuffer?.Release();
+        
+        if (circleRenderer != null) Destroy(circleRenderer.gameObject);
         if (lineRenderer != null) Destroy(lineRenderer.gameObject);
         
         if (particleLabels != null)
@@ -1105,7 +1199,8 @@ public class ParticleSystemController : MonoBehaviour
 
     // Resize particle buffers when more capacity is needed
     private void ResizeParticleBuffers(int newCapacity)
-    {        // Store old data
+    {
+        // Store old data
         Particle[] oldParticleData = new Particle[particleCount];
         particleBuffer.GetData(oldParticleData);
         
