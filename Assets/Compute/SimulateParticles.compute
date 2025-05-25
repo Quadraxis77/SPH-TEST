@@ -423,9 +423,7 @@ void ApplyAdhesionConstraints(uint id : SV_DispatchThreadID)
     if (dist > 1e-6)
     {
         float3 dir = delta / dist;
-        float displacement = dist - conn.restLength;
-        // Apply 5x stronger spring force for more noticeable effect
-        float springMultiplier = 5.0;
+        float displacement = dist - conn.restLength;        float springMultiplier = 1.0;
         float3 force = dir * (displacement * conn.springStiffness * springMultiplier);
         float3 relVel = pB.velocity - pA.velocity;
         float dampingForce = dot(relVel, dir) * conn.springDamping;
@@ -445,12 +443,9 @@ void ApplyAdhesionConstraints(uint id : SV_DispatchThreadID)
     float4 rotB = pB.rotation;
     float4 rel = conn.initialRelOrientation;
     float4 targetRotB = quat_mul(rotA, rel);
-    float orientationStiffness = 30.0f; // Increased from 10.0 to 30.0 for stronger effect
+    float orientationStiffness = 10.0f;
     float t = saturate(orientationStiffness * deltaTime);
-    float4 newRotB = normalize(lerp(rotB, targetRotB, t));
-    float4 rotDelta = newRotB - rotB;
-    // DEBUG: Write out diagnostic values to a buffer (if available)
-    // (You may need to add a debug buffer to the shader and C# to read these values on the CPU)
+    float4 newRotB = normalize(lerp(rotB, targetRotB, t));    float4 rotDelta = newRotB - rotB;
     int4 scaledRot = (int4)round(rotDelta * ADHESION_DELTA_SCALE);
     InterlockedAdd(adhesionRotationDeltaBuffer[idxB].x, scaledRot.x);
     InterlockedAdd(adhesionRotationDeltaBuffer[idxB].y, scaledRot.y);
@@ -467,16 +462,12 @@ void ApplyAdhesionDeltas(uint id : SV_DispatchThreadID)
     // Get deltas and convert from int to float
     int3 rawVDelta = adhesionVelocityDeltaBuffer[id];
     int4 rawRDelta = adhesionRotationDeltaBuffer[id];
-    
-    // Scaling back to float values
+      // Scaling back to float values
     float3 vDelta = (float3)rawVDelta / ADHESION_DELTA_SCALE;
     float4 rDelta = (float4)rawRDelta / ADHESION_DELTA_SCALE;
     
-    // Apply stronger constraint effect for debugging
-    float constraintMultiplier = 10.0;
-    p.velocity += vDelta * constraintMultiplier;
-    
-    // Apply rotation delta (don't multiply by constraintMultiplier to avoid over-rotation)
+    p.velocity += vDelta;    
+    // Apply rotation delta
     p.rotation = normalize(p.rotation + rDelta);
     
     // Write back and reset deltas

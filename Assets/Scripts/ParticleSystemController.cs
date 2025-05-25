@@ -219,10 +219,8 @@ public class ParticleSystemController : MonoBehaviour
             try
             {
                 genome.ValidateForSimulation();
-            }
-            catch (System.InvalidOperationException ex)
+            }            catch (System.InvalidOperationException)
             {
-                Debug.LogError($"Error in genome configuration: {ex.Message}");
                 enabled = false; // Disable this component to prevent the simulation from running
                 return;
             }
@@ -239,15 +237,12 @@ public class ParticleSystemController : MonoBehaviour
         InitializeParticles();
         
         // Initialize particle labels
-        InitializeParticleLabels();
-        // Initialize split plane rings
+        InitializeParticleLabels();        // Initialize split plane rings
         InitializeSplitPlaneRings();
-    }    // SimulateAdhesionConnections method has been removed as part of bond removal
+    }
 
     void Update()
     {
-        Debug.unityLogger.logEnabled = true;
-        Debug.Log("Update running");
         float dt = Time.deltaTime;
         int threadGroups = Mathf.CeilToInt(particleCount / 64f);
 
@@ -286,33 +281,13 @@ public class ParticleSystemController : MonoBehaviour
         computeShader.SetBuffer(kernelApplySPHForces, "gridNext", gridNext);
         computeShader.SetBuffer(kernelApplySPHForces, "gridParticleIndices", gridParticleIndices);
         computeShader.SetBuffer(kernelApplySPHForces, "torqueAccumBuffer", torqueAccumBuffer);
-        computeShader.Dispatch(kernelApplySPHForces, threadGroups, 1, 1);
-
-        // --- Apply adhesion constraints immediately after SPH forces ---
-        if (adhesionManager == null)
-        {
-            Debug.LogWarning("adhesionManager is null in Update()");
-        }
-        if (adhesionConnectionBuffer == null)
-        {
-            Debug.LogWarning("adhesionConnectionBuffer is null in Update()");
-        }
-        if (adhesionManager != null && adhesionConnectionBuffer != null)
-        {
+        computeShader.Dispatch(kernelApplySPHForces, threadGroups, 1, 1);        // --- Apply adhesion constraints immediately after SPH forces ---
+        if (adhesionManager != null && adhesionConnectionBuffer != null){
             var connections = adhesionManager.GetAdhesionConnectionsForGPU();
             int count = Mathf.Min(connections.Length, maxAdhesionConnections);
-            Debug.Log($"Applying {count} adhesion connections to GPU");
             
             if (count > 0)
             {
-                // Log the first few connections for debugging
-                for (int i = 0; i < Mathf.Min(count, 3); i++)
-                {
-                    var conn = connections[i];
-                    Debug.Log($"  Bond {i}: particles {conn.particleA}->{conn.particleB}, " + 
-                        $"rest={conn.restLength:F2}, stiffness={conn.springStiffness:F2}, damping={conn.springDamping:F2}");
-                }
-
                 adhesionConnectionBuffer.SetData(connections, 0, 0, count);
                 // Clear delta buffers
                 adhesionVelocityDeltaBuffer.SetData(new int[particleCount * 3]);
@@ -329,18 +304,8 @@ public class ParticleSystemController : MonoBehaviour
                   // Apply deltas to each particle
                 computeShader.SetBuffer(kernelApplyAdhesionDeltas, "particleBuffer", particleBuffer);
                 computeShader.SetBuffer(kernelApplyAdhesionDeltas, "adhesionVelocityDeltaBuffer", adhesionVelocityDeltaBuffer);
-                computeShader.SetBuffer(kernelApplyAdhesionDeltas, "adhesionRotationDeltaBuffer", adhesionRotationDeltaBuffer);
-                computeShader.SetFloat("deltaTime", dt);
+                computeShader.SetBuffer(kernelApplyAdhesionDeltas, "adhesionRotationDeltaBuffer", adhesionRotationDeltaBuffer);                computeShader.SetFloat("deltaTime", dt);
                 computeShader.Dispatch(kernelApplyAdhesionDeltas, threadGroups, 1, 1);
-                  // Debug: Check output of the delta application
-                Particle[] debugParticles = new Particle[Mathf.Min(particleCount, 10)];
-                particleBuffer.GetData(debugParticles, 0, 0, debugParticles.Length);
-                Debug.Log($"After applying deltas: First few particles: " + 
-                    $"Pos[0]={debugParticles[0].position}, Vel[0]={debugParticles[0].velocity}");
-            }
-            else
-            {
-                Debug.Log("No adhesion connections to apply; skipping adhesion constraint kernels.");
             }
         }
         // --- End adhesion constraints ---
@@ -992,14 +957,10 @@ public class ParticleSystemController : MonoBehaviour
 
         // Write updated particle data back to the buffer
         particleBuffer.SetData(particleData);
-        
-        // Clear pending splits after processing
+          // Clear pending splits after processing
         pendingSplits.Clear();
           // Create labels for the new particles
         CreateLabelsForNewParticles(newParticleIndices, newParticleIds);
-        
-        // Log active particle count for debugging
-        Debug.Log($"Active particle count after splits: {activeParticleCount}");
     }
 
     private Vector3 GetDirection(float yaw, float pitch)

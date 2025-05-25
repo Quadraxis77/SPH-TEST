@@ -87,11 +87,8 @@ public class CellGenome : ScriptableObject
             throw new System.InvalidOperationException(
                 $"Multiple initial modes detected: {modeList}. Only one mode can be marked as initial during simulation.");
         }
-    }
-
-    void OnValidate()
+    }    void OnValidate()
     {
-        Debug.Log("[OnValidate] Validating genome and refreshing mode indexes.");
         RefreshModeIndexes();
 
         // Don't enforce any initial mode requirements in the editor

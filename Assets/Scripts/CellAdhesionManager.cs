@@ -433,11 +433,8 @@ public class CellAdhesionManager : MonoBehaviour
         public float springDamping;
         public Vector4 color;
         public Vector4 initialRelOrientation; // New: relative orientation as float4
-    }
-
-    public AdhesionConnectionExport[] GetAdhesionConnectionsForGPU()
+    }    public AdhesionConnectionExport[] GetAdhesionConnectionsForGPU()
     {
-        Debug.Log($"[AdhesionManager] bonds.Count = {bonds.Count}");
         if (particleSystemController == null) return new AdhesionConnectionExport[0];
         var ids = particleSystemController.ParticleIDs;
         var genome = particleSystemController.genome;
@@ -468,10 +465,8 @@ public class CellAdhesionManager : MonoBehaviour
                 springStiffness = springStiffness,
                 springDamping = springDamping,
                 color = color,
-                initialRelOrientation = new Vector4(bond.initialRelOrientation.x, bond.initialRelOrientation.y, bond.initialRelOrientation.z, bond.initialRelOrientation.w)
-            });
+                initialRelOrientation = new Vector4(bond.initialRelOrientation.x, bond.initialRelOrientation.y, bond.initialRelOrientation.z, bond.initialRelOrientation.w)            });
         }
-        Debug.Log($"[AdhesionManager] Exporting {result.Count} adhesion connections to GPU");
         return result.ToArray();
     }
 }
