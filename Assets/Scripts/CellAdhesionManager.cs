@@ -10,17 +10,30 @@ public class CellAdhesionManager : MonoBehaviour
     public Color zoneAColor = Color.green;
     public Color zoneBColor = Color.blue;
     public Color zoneCColor = Color.red;
+    
+    // Anchor visualization properties
+    public bool showAnchors = true;
+    public float anchorSize = 0.1f;
+    public Color anchorColor = Color.yellow;
 
     private List<AdhesionBond> bonds = new List<AdhesionBond>();
     private List<LineRenderer> bondLines = new List<LineRenderer>();
+
+    // Anchor data for each bond end
+    public class BondAnchor
+    {
+        public Vector3 localPosition;  // Position relative to cell's center
+        public int cellID;            // The cell this anchor is attached to
+        public float radius;          // The cell's radius at creation time
+    }
 
     // Metadata for each bond
     public class AdhesionBond
     {
         public int cellA;
         public int cellB;
-        public BondZone zoneA; // zone for cellA's end
-        public BondZone zoneB; // zone for cellB's end
+        public BondZone zoneA;
+        public BondZone zoneB;
         // Track if this bond is a direct Child-to-Child bond (exempt until either splits)
         public bool isChildToChild = false;
         // Store the unique IDs of the two children at bond creation
@@ -31,6 +44,8 @@ public class CellAdhesionManager : MonoBehaviour
         public BondZone initialZoneB;
         public int creationFrame; // Track the frame when bond was created
         public Quaternion initialRelOrientation; // New: relative orientation from A to B at bond creation
+        public BondAnchor anchorA;    // Anchor point on cell A
+        public BondAnchor anchorB;    // Anchor point on cell B
         // Add more metadata as needed
     }
 
@@ -71,34 +86,42 @@ public class CellAdhesionManager : MonoBehaviour
         if (cellA == cellB || cellA < 0 || cellB < 0) return;
         if (bonds.Exists(b => (b.cellA == cellA && b.cellB == cellB) || (b.cellA == cellB && b.cellB == cellA)))
             return;
+
+        // Create the bond with null anchors - they will be initialized on first update
         var bond = new AdhesionBond
         {
             cellA = cellA,
             cellB = cellB,
             zoneA = zoneA,
             zoneB = zoneB,
-            initialZoneA = zoneA, // Store initial zone configuration 
+            initialZoneA = zoneA,
             initialZoneB = zoneB,
             isChildToChild = isChildToChild,
             childAUniqueID = childAUniqueID,
             childBUniqueID = childBUniqueID,
-            creationFrame = Time.frameCount, // Set creation frame
-            initialRelOrientation = Quaternion.identity // Will be set below
+            creationFrame = Time.frameCount,
+            initialRelOrientation = Quaternion.identity,
+            // Initialize anchors as null - they will be set up in UpdateBondZones
+            anchorA = null,
+            anchorB = null
         };
+
         // Set initial relative orientation if possible
         if (particleSystemController != null && particleSystemController.CpuParticleRotations != null)
         {
             int idxA = GetIndexForUniqueID(cellA);
             int idxB = GetIndexForUniqueID(cellB);
-            if (idxA >= 0 && idxB >= 0 && idxA < particleSystemController.CpuParticleRotations.Length && idxB < particleSystemController.CpuParticleRotations.Length)
+            if (idxA >= 0 && idxB >= 0 &&
+                idxA < particleSystemController.CpuParticleRotations.Length &&
+                idxB < particleSystemController.CpuParticleRotations.Length)
             {
                 Quaternion rotA = particleSystemController.CpuParticleRotations[idxA];
                 Quaternion rotB = particleSystemController.CpuParticleRotations[idxB];
                 bond.initialRelOrientation = Quaternion.Inverse(rotA) * rotB;
             }
         }
+
         bonds.Add(bond);
-        // Create visuals for this bond
         CreateBondVisual(bond);
     }
 
@@ -306,14 +329,50 @@ public class CellAdhesionManager : MonoBehaviour
         };
         foreach (var bond in bonds)
         {
-            // Skip updating bonds more than 2 frames after creation
-            if (Time.frameCount > bond.creationFrame + 2)
+            // Skip updating bonds more than 1 frame after creation
+            if (Time.frameCount > bond.creationFrame + 1)
                 continue;
+            
             int idxA = GetIndexForUniqueID(bond.cellA);
             int idxB = GetIndexForUniqueID(bond.cellB);
             if (idxA < 0 || idxB < 0 || idxA >= positions.Length || idxB >= positions.Length ||
                 rotations == null || idxA >= rotations.Length || idxB >= rotations.Length)
                 continue;
+            
+            Vector3 posA = positions[idxA];
+            Vector3 posB = positions[idxB];
+            Quaternion rotA = rotations[idxA];
+            Quaternion rotB = rotations[idxB];
+                
+            // Initialize anchors if they haven't been set yet and we're at creation frame + 1
+            if (Time.frameCount == bond.creationFrame + 1 && (bond.anchorA == null || bond.anchorB == null))
+            {
+                // Calculate bond direction and anchor points
+                Vector3 bondDirection = (posB - posA).normalized;
+                float cellRadiusA = 1f; // Assuming default radius of 1
+                float cellRadiusB = 1f;
+                
+                // Calculate intersection points with cell surfaces
+                Vector3 anchorPosA = posA + (bondDirection * cellRadiusA);
+                Vector3 anchorPosB = posB + (-bondDirection * cellRadiusB);
+                
+                // Create the anchors
+                bond.anchorA = new BondAnchor
+                {
+                    cellID = bond.cellA,
+                    localPosition = Quaternion.Inverse(rotA) * (anchorPosA - posA),
+                    radius = cellRadiusA
+                };
+                
+                bond.anchorB = new BondAnchor
+                {
+                    cellID = bond.cellB,
+                    localPosition = Quaternion.Inverse(rotB) * (anchorPosB - posB),
+                    radius = cellRadiusB
+                };
+            }
+            
+            // Update zones
             int modeA = getModeIndex(idxA);
             int modeB = getModeIndex(idxB);
             float splitYawA = 0f, splitPitchA = 0f;
@@ -328,10 +387,7 @@ public class CellAdhesionManager : MonoBehaviour
                 splitYawB = genome.modes[modeB].parentSplitYaw;
                 splitPitchB = genome.modes[modeB].parentSplitPitch;
             }
-            Vector3 posA = positions[idxA];
-            Vector3 posB = positions[idxB];
-            Quaternion rotA = rotations[idxA];
-            Quaternion rotB = rotations[idxB];
+
             // Evaluate zone for A->B and B->A directions using actual rotations
             bond.zoneA = ClassifyBondDirection(posA, rotA, posB, splitYawA, splitPitchA);
             bond.zoneB = ClassifyBondDirection(posB, rotB, posA, splitYawB, splitPitchB);
@@ -468,5 +524,31 @@ public class CellAdhesionManager : MonoBehaviour
                 initialRelOrientation = new Vector4(bond.initialRelOrientation.x, bond.initialRelOrientation.y, bond.initialRelOrientation.z, bond.initialRelOrientation.w)            });
         }
         return result.ToArray();
+    }    private void OnDrawGizmos()
+    {
+        if (!showAnchors || particleSystemController == null) return;
+
+        Gizmos.color = anchorColor;
+        foreach (var bond in bonds)
+        {
+            int idxA = GetIndexForUniqueID(bond.cellA);
+            int idxB = GetIndexForUniqueID(bond.cellB);            if (idxA >= 0 && idxA < particleSystemController.CpuParticlePositions.Length &&
+                idxB >= 0 && idxB < particleSystemController.CpuParticlePositions.Length &&
+                bond.anchorA != null && bond.anchorB != null) // Add null checks for anchors
+            {                // Get current cell positions and rotations
+                Vector3 posA = particleSystemController.CpuParticlePositions[idxA];
+                Vector3 posB = particleSystemController.CpuParticlePositions[idxB];
+                Quaternion rotA = particleSystemController.CpuParticleRotations[idxA];
+                Quaternion rotB = particleSystemController.CpuParticleRotations[idxB];
+                
+                // Transform stored local anchor positions to world space
+                Vector3 anchorWorldPosA = posA + (rotA * bond.anchorA.localPosition);
+                Vector3 anchorWorldPosB = posB + (rotB * bond.anchorB.localPosition);
+
+                // Draw anchor points
+                Gizmos.DrawWireSphere(anchorWorldPosA, anchorSize);
+                Gizmos.DrawWireSphere(anchorWorldPosB, anchorSize);
+            }
+        }
     }
 }
