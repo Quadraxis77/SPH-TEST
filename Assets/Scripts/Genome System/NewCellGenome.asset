@@ -18,7 +18,7 @@ MonoBehaviour:
     splitInterval: 5
     isInitial: 1
     parentMakeAdhesion: 1
-    modeColor: {r: 1, g: 1, b: 1, a: 0}
+    modeColor: {r: 0, g: 0, b: 0, a: 0}
     parentSplitYaw: 0
     parentSplitPitch: 0
     childAModeIndex: 0
@@ -26,7 +26,7 @@ MonoBehaviour:
     childA_OrientationPitch: 0
     childA_KeepAdhesion: 1
     childBModeIndex: 0
-    childB_OrientationYaw: 0
+    childB_OrientationYaw: 90
     childB_OrientationPitch: 0
     childB_KeepAdhesion: 1
     adhesionRestLength: 1

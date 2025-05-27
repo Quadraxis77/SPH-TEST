@@ -171,8 +171,11 @@ MonoBehaviour:
   labelOffset: 2.5
   labelScale: 0.5
   labelColor: {r: 1, g: 1, b: 1, a: 1}
-  adhesionLineColor: {r: 1, g: 0.92156863, b: 0.015686275, a: 1}
-  adhesionConnectionDistance: 2.1
+  showSplitPlaneRings: 0
+  splitPlaneRingRadius: 2
+  splitPlaneRingSegments: 48
+  splitPlaneRingColor: {r: 0, g: 1, b: 1, a: 1}
+  adhesionManager: {fileID: 2074529640}
 --- !u!4 &412325791
 Transform:
   m_ObjectHideFlags: 0
@@ -426,6 +429,59 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 50, y: -30, z: 0}
+--- !u!1 &2074529639
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 2074529641}
+  - component: {fileID: 2074529640}
+  m_Layer: 0
+  m_Name: Adhesion Manager
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!114 &2074529640
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2074529639}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 08949fd7781b11148918be4116705b45, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  particleSystemController: {fileID: 412325790}
+  bondMaterial: {fileID: 10306, guid: 0000000000000000f000000000000000, type: 0}
+  bondWidth: 0.05
+  zoneAColor: {r: 0, g: 1, b: 0, a: 1}
+  zoneBColor: {r: 0, g: 0, b: 1, a: 1}
+  zoneCColor: {r: 1, g: 0, b: 0, a: 1}
+  showAnchors: 1
+  anchorSize: 0.1
+  anchorColor: {r: 1, g: 0.92156863, b: 0.015686275, a: 1}
+--- !u!4 &2074529641
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2074529639}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: -4.578308, y: -3.393342, z: -5.6024423}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0
@@ -433,3 +489,4 @@ SceneRoots:
   - {fileID: 1453874143}
   - {fileID: 1742494577}
   - {fileID: 412325791}
+  - {fileID: 2074529641}
