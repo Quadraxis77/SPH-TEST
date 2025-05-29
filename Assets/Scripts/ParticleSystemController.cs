@@ -66,9 +66,7 @@ public class ParticleSystemController : MonoBehaviour
     ComputeBuffer positionReadbackBuffer, rotationReadbackBuffer;
     ComputeBuffer gridHeads, gridNext, gridParticleIndices;
     ComputeBuffer torqueAccumBuffer;
-    ComputeBuffer adhesionConnectionBuffer;
-    ComputeBuffer adhesionVelocityDeltaBuffer;
-    ComputeBuffer adhesionRotationDeltaBuffer;
+    ComputeBuffer adhesionConnectionBuffer;    ComputeBuffer adhesionVelocityDeltaBuffer;
 
     const int GRID_DIM = 32;
     const int GRID_TOTAL = GRID_DIM * GRID_DIM * GRID_DIM;
@@ -152,8 +150,7 @@ public class ParticleSystemController : MonoBehaviour
         public Vector3 targetPosition;
         public float strength;
     }
-    
-    // The Particle struct used to match with the compute shader definition
+      // The Particle struct used to match with the compute shader definition
     struct Particle
     {
         public Vector3 position;
@@ -168,7 +165,7 @@ public class ParticleSystemController : MonoBehaviour
         public float drag;
         public float repulsionStrength;
         public uint genomeFlags;
-        public float orientConstraintStr;
+        public float padding; // Removed orientConstraintStr
         
         public Quaternion rotation;
         public int modeIndex; // Added field to store the mode index
@@ -195,13 +192,10 @@ public class ParticleSystemController : MonoBehaviour
     {
         public int parentMakeAdhesion;
         public int childA_KeepAdhesion;
-        public int childB_KeepAdhesion;
-        public float adhesionRestLength;
+        public int childB_KeepAdhesion;        public float adhesionRestLength;
         public float adhesionSpringStiffness;
         public float adhesionSpringDamping;
         public uint colorPacked;
-        public float orientConstraintStrength;
-        public float maxAngleDeviation;
     }
     
     #endregion
@@ -288,23 +282,20 @@ public class ParticleSystemController : MonoBehaviour
             
             if (count > 0)
             {
-                adhesionConnectionBuffer.SetData(connections, 0, 0, count);
-                // Clear delta buffers
+                adhesionConnectionBuffer.SetData(connections, 0, 0, count);                // Clear delta buffers
                 adhesionVelocityDeltaBuffer.SetData(new int[particleCount * 3]);
-                adhesionRotationDeltaBuffer.SetData(new int[particleCount * 4]);
 
                 computeShader.SetBuffer(kernelApplyAdhesionConstraints, "adhesionConnectionBuffer", adhesionConnectionBuffer);
                 computeShader.SetInt("adhesionConnectionCount", count);
                 computeShader.SetBuffer(kernelApplyAdhesionConstraints, "particleBuffer", particleBuffer);
                 computeShader.SetBuffer(kernelApplyAdhesionConstraints, "adhesionVelocityDeltaBuffer", adhesionVelocityDeltaBuffer);
-                computeShader.SetBuffer(kernelApplyAdhesionConstraints, "adhesionRotationDeltaBuffer", adhesionRotationDeltaBuffer);
                 // Explicitly set deltaTime for the adhesion constraints kernel
                 computeShader.SetFloat("deltaTime", dt);
                 computeShader.Dispatch(kernelApplyAdhesionConstraints, count, 1, 1);
                   // Apply deltas to each particle
                 computeShader.SetBuffer(kernelApplyAdhesionDeltas, "particleBuffer", particleBuffer);
                 computeShader.SetBuffer(kernelApplyAdhesionDeltas, "adhesionVelocityDeltaBuffer", adhesionVelocityDeltaBuffer);
-                computeShader.SetBuffer(kernelApplyAdhesionDeltas, "adhesionRotationDeltaBuffer", adhesionRotationDeltaBuffer);                computeShader.SetFloat("deltaTime", dt);
+                computeShader.SetFloat("deltaTime", dt);
                 computeShader.Dispatch(kernelApplyAdhesionDeltas, threadGroups, 1, 1);
             }
         }
@@ -426,28 +417,18 @@ public class ParticleSystemController : MonoBehaviour
         lineRenderer.positionCount = 2;
         lineRenderer.material = new Material(Shader.Find("Sprites/Default"));
         lineRenderer.material.color = dragCircleColor;
-        lineRenderer.enabled = false;
-
-        // --- Ensure adhesionConnectionBuffer is allocated ---
+        lineRenderer.enabled = false;        // --- Ensure adhesionConnectionBuffer is allocated ---
         if (adhesionConnectionBuffer != null)
         {
             adhesionConnectionBuffer.Release();
         }
-        // Each bond is a struct of 48 bytes (int, int, float, float, float, float4, float4)
-        adhesionConnectionBuffer = new ComputeBuffer(maxAdhesionConnections, sizeof(int) * 2 + sizeof(float) * 3 + sizeof(float) * 4 + sizeof(float) * 4);
-
-        // --- Ensure adhesionVelocityDeltaBuffer and adhesionRotationDeltaBuffer are allocated ---
+        // Each bond is a struct of 36 bytes (int, int, float, float, float, float4)
+        adhesionConnectionBuffer = new ComputeBuffer(maxAdhesionConnections, sizeof(int) * 2 + sizeof(float) * 3 + sizeof(float) * 4);// --- Ensure adhesionVelocityDeltaBuffer is allocated ---
         if (adhesionVelocityDeltaBuffer != null)
         {
             adhesionVelocityDeltaBuffer.Release();
         }
         adhesionVelocityDeltaBuffer = new ComputeBuffer(particleCount * 3, sizeof(int));
-
-        if (adhesionRotationDeltaBuffer != null)
-        {
-            adhesionRotationDeltaBuffer.Release();
-        }
-        adhesionRotationDeltaBuffer = new ComputeBuffer(particleCount * 4, sizeof(int));
     }
 
     private void ReleaseBuffers()
@@ -461,10 +442,8 @@ public class ParticleSystemController : MonoBehaviour
         gridNext?.Release();
         gridParticleIndices?.Release();
         torqueAccumBuffer?.Release();
-        genomeModesBuffer?.Release(); // Release the genome modes buffer
-        adhesionConnectionBuffer?.Release();
+        genomeModesBuffer?.Release(); // Release the genome modes buffer        adhesionConnectionBuffer?.Release();
         adhesionVelocityDeltaBuffer?.Release();
-        adhesionRotationDeltaBuffer?.Release();
         
         if (circleRenderer != null) Destroy(circleRenderer.gameObject);
         if (lineRenderer != null) Destroy(lineRenderer.gameObject);
@@ -1243,18 +1222,14 @@ public class ParticleSystemController : MonoBehaviour
         for (int i = 0; i < modeCount; i++)
         {
             GenomeMode mode = genome.modes[i];
-            uint colorPacked = PackColorToUint(mode.modeColor);
-            modeData[i] = new GenomeColorData
+            uint colorPacked = PackColorToUint(mode.modeColor);            modeData[i] = new GenomeColorData
             {
                 parentMakeAdhesion = 0, // Set as needed
                 childA_KeepAdhesion = 0, // Set as needed
                 childB_KeepAdhesion = 0, // Set as needed
-                adhesionRestLength = 0f, // Set as needed
-                adhesionSpringStiffness = 0f, // Set as needed
+                adhesionRestLength = 0f, // Set as needed                adhesionSpringStiffness = 0f, // Set as needed
                 adhesionSpringDamping = 0f, // Set as needed
-                colorPacked = colorPacked,
-                orientConstraintStrength = mode.orientationConstraintStrength,
-                maxAngleDeviation = mode.maxAllowedAngleDeviation
+                colorPacked = colorPacked
             };
         }
         genomeModesBuffer.SetData(modeData);

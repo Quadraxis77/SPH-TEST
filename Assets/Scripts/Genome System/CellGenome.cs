@@ -151,17 +151,10 @@ public class GenomeMode
     public int childBModeIndex = -1;
     [Range(-180f, 180f)] public float childB_OrientationYaw = 0f;
     [Range(-90f, 90f)] public float childB_OrientationPitch = 0f;
-    public bool childB_KeepAdhesion = false;
-
-    [Header("Adhesion Settings")]
+    public bool childB_KeepAdhesion = false;    [Header("Adhesion Settings")]
     [Range(1f, 10f)] public float adhesionRestLength = 3.0f;      // Natural length of the adhesion spring
     [Range(10f, 500f)] public float adhesionSpringStiffness = 100f; // Spring constant (10-500)
     [Range(0f, 100f)] public float adhesionSpringDamping = 5f;     // Damping coefficient (0-100)
-    
-    // Orientation constraints
-    [Header("Orientation Constraints")]
-    [Range(0f, 1f)] public float orientationConstraintStrength = 0.5f;
-    [Range(0f, 180f)] public float maxAllowedAngleDeviation = 45f;
     
     // Make connections break under extreme force?
     [Header("Adhesion Breaking")]

@@ -33,12 +33,10 @@ Shader "Custom/InstancedParticles_URP"
                 float mass;
 
                 float3 angularVelocity;
-                float momentOfInertia;
-
-                float drag;
+                float momentOfInertia;                float drag;
                 float repulsionStrength;
                 uint genomeFlags; // Added to match compute buffer 
-                float orientConstraintStr; // Added to match compute buffer
+                float padding2; // Replaced orientConstraintStr with padding
 
                 float4 rotation;
                 int modeIndex; // Added to match C# struct
@@ -50,13 +48,10 @@ Shader "Custom/InstancedParticles_URP"
             struct GenomeAdhesionData {
                 int parentMakeAdhesion;
                 int childA_KeepAdhesion;
-                int childB_KeepAdhesion;
-                float adhesionRestLength;
+                int childB_KeepAdhesion;                float adhesionRestLength;
                 float adhesionSpringStiffness;
                 float adhesionSpringDamping;
                 uint colorPacked;
-                float orientConstraintStrength;
-                float maxAngleDeviation;
             };
 
             StructuredBuffer<GenomeAdhesionData> genomeModesBuffer;

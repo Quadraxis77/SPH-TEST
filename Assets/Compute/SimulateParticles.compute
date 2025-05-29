@@ -47,7 +47,6 @@ struct AdhesionConnection {
     float springStiffness;
     float springDamping;
     float4 connectionColor; // RGBA
-    float4 initialRelOrientation; // New: relative orientation from A to B at bond creation
 };
 
 // Simplified data struct without adhesion properties
@@ -80,7 +79,6 @@ RWStructuredBuffer<uint> gridNext;
 RWStructuredBuffer<uint> gridParticleIndices;
 
 RWStructuredBuffer<int3> adhesionVelocityDeltaBuffer;
-RWStructuredBuffer<int4> adhesionRotationDeltaBuffer;
 
 float deltaTime;
 float spawnRadius;
@@ -436,21 +434,8 @@ void ApplyAdhesionConstraints(uint id : SV_DispatchThreadID)
         InterlockedAdd(adhesionVelocityDeltaBuffer[idxA].y, scaledA.y);
         InterlockedAdd(adhesionVelocityDeltaBuffer[idxA].z, scaledA.z);
         InterlockedAdd(adhesionVelocityDeltaBuffer[idxB].x, scaledB.x);
-        InterlockedAdd(adhesionVelocityDeltaBuffer[idxB].y, scaledB.y);
-        InterlockedAdd(adhesionVelocityDeltaBuffer[idxB].z, scaledB.z);
-    }    // --- Orientation constraint (keep relative orientation fixed) ---
-    float4 rotA = pA.rotation;
-    float4 rotB = pB.rotation;
-    float4 rel = conn.initialRelOrientation;
-    float4 targetRotB = quat_mul(rotA, rel);
-    float orientationStiffness = 10.0f;
-    float t = saturate(orientationStiffness * deltaTime);
-    float4 newRotB = normalize(lerp(rotB, targetRotB, t));    float4 rotDelta = newRotB - rotB;
-    int4 scaledRot = (int4)round(rotDelta * ADHESION_DELTA_SCALE);
-    InterlockedAdd(adhesionRotationDeltaBuffer[idxB].x, scaledRot.x);
-    InterlockedAdd(adhesionRotationDeltaBuffer[idxB].y, scaledRot.y);
-    InterlockedAdd(adhesionRotationDeltaBuffer[idxB].z, scaledRot.z);
-    InterlockedAdd(adhesionRotationDeltaBuffer[idxB].w, scaledRot.w);
+        InterlockedAdd(adhesionVelocityDeltaBuffer[idxB].y, scaledB.y);        InterlockedAdd(adhesionVelocityDeltaBuffer[idxB].z, scaledB.z);
+    }
 }
 
 [numthreads(THREADS, 1, 1)]
@@ -459,19 +444,13 @@ void ApplyAdhesionDeltas(uint id : SV_DispatchThreadID)
     if (id >= (uint)particleBuffer.Length || id >= (uint)activeParticleCount) return;
     Particle p = particleBuffer[id];
     
-    // Get deltas and convert from int to float
+    // Get velocity deltas and convert from int to float
     int3 rawVDelta = adhesionVelocityDeltaBuffer[id];
-    int4 rawRDelta = adhesionRotationDeltaBuffer[id];
-      // Scaling back to float values
     float3 vDelta = (float3)rawVDelta / ADHESION_DELTA_SCALE;
-    float4 rDelta = (float4)rawRDelta / ADHESION_DELTA_SCALE;
     
-    p.velocity += vDelta;    
-    // Apply rotation delta
-    p.rotation = normalize(p.rotation + rDelta);
+    p.velocity += vDelta;
     
     // Write back and reset deltas
     particleBuffer[id] = p;
     adhesionVelocityDeltaBuffer[id] = int3(0,0,0);
-    adhesionRotationDeltaBuffer[id] = int4(0,0,0,0);
 }
