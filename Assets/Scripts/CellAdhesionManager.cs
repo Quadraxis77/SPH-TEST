@@ -417,6 +417,12 @@ public class CellAdhesionManager : MonoBehaviour
         public float springStiffness;
         public float springDamping;
         public Vector4 color;
+        
+        // Orientation tracking data
+        public Vector3 initialPitchYawRoll;  // Initial bond orientation (pitch, yaw, roll in degrees)
+        public int creationFrame;            // Frame when bond was created
+        public int orientationCaptured;      // Flag: 0 = not captured, 1 = captured
+        public Vector3 currentDeviation;     // Current angular deviation from initial (pitch, yaw, roll in degrees)
     }public AdhesionConnectionExport[] GetAdhesionConnectionsForGPU()
     {
         if (particleSystemController == null) return new AdhesionConnectionExport[0];
@@ -440,15 +446,18 @@ public class CellAdhesionManager : MonoBehaviour
                 restLength = genome.modes[modeA].adhesionRestLength;
                 springStiffness = genome.modes[modeA].adhesionSpringStiffness;
                 springDamping = genome.modes[modeA].adhesionSpringDamping;                color = genome.modes[modeA].modeColor;
-            }
-
-            result.Add(new AdhesionConnectionExport {
+            }            result.Add(new AdhesionConnectionExport {
                 particleA = idxA,
                 particleB = idxB,
                 restLength = restLength,
                 springStiffness = springStiffness,
                 springDamping = springDamping,
-                color = color
+                color = color,
+                // Initialize orientation tracking fields
+                initialPitchYawRoll = Vector3.zero,
+                creationFrame = bond.creationFrame,
+                orientationCaptured = 0,  // Will be set to 1 by GPU kernel one frame after creation
+                currentDeviation = Vector3.zero
             });
         }
         return result.ToArray();

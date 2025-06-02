@@ -9,6 +9,8 @@
 #pragma kernel CopyRotationsToReadbackBuffer
 #pragma kernel ApplyAdhesionConstraints
 #pragma kernel ApplyAdhesionDeltas
+#pragma kernel CaptureInitialBondOrientations
+#pragma kernel CalculateBondOrientationDeviations
 
 #pragma target 5.0
 
@@ -47,6 +49,12 @@ struct AdhesionConnection {
     float springStiffness;
     float springDamping;
     float4 connectionColor; // RGBA
+    
+    // Orientation tracking data
+    float3 initialPitchYawRoll; // Initial bond orientation (pitch, yaw, roll in degrees)
+    int creationFrame;          // Frame when bond was created
+    int orientationCaptured;    // Flag: 0 = not captured, 1 = captured
+    float3 currentDeviation;    // Current angular deviation from initial (pitch, yaw, roll in degrees)
 };
 
 // Simplified data struct without adhesion properties
@@ -55,7 +63,7 @@ struct GenomeData {
 };
 
 // Buffer for adhesion connections
-StructuredBuffer<AdhesionConnection> adhesionConnectionBuffer;
+RWStructuredBuffer<AdhesionConnection> adhesionConnectionBuffer;
 int adhesionConnectionCount;
 
 StructuredBuffer<GenomeData> genomeModesBuffer;
@@ -92,6 +100,7 @@ float rollingContactRadiusMultiplier;
 float density;
 float repulsionStrength;
 int activeParticleCount;
+int currentFrame;
 
 uint3 GetGridCoord(float3 pos) {
     float3 gridPos = (pos + spawnRadius) / GRID_CELL_SIZE;
@@ -453,4 +462,119 @@ void ApplyAdhesionDeltas(uint id : SV_DispatchThreadID)
     // Write back and reset deltas
     particleBuffer[id] = p;
     adhesionVelocityDeltaBuffer[id] = int3(0,0,0);
+}
+
+// Helper function to convert quaternion to Euler angles (pitch, yaw, roll in degrees)
+float3 QuaternionToEuler(float4 q)
+{
+    float3 angles;
+    
+    // Roll (x-axis rotation)
+    float sinr_cosp = 2 * (q.w * q.x + q.y * q.z);
+    float cosr_cosp = 1 - 2 * (q.x * q.x + q.y * q.y);
+    angles.z = atan2(sinr_cosp, cosr_cosp);
+    
+    // Pitch (y-axis rotation)
+    float sinp = 2 * (q.w * q.y - q.z * q.x);
+    if (abs(sinp) >= 1)
+        angles.x = sign(sinp) * 1.5707963267948966; // Use 90 degrees if out of range
+    else
+        angles.x = asin(sinp);
+    
+    // Yaw (z-axis rotation)
+    float siny_cosp = 2 * (q.w * q.z + q.x * q.y);
+    float cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z);
+    angles.y = atan2(siny_cosp, cosy_cosp);
+    
+    // Convert from radians to degrees
+    return angles * 57.2957795131; // 180/PI
+}
+
+// Helper function to calculate bond orientation from two particles
+float3 CalculateBondOrientation(Particle pA, Particle pB)
+{
+    // Calculate bond direction vector
+    float3 bondDir = normalize(pB.position - pA.position);
+    
+    // Calculate relative rotation between particles
+    float4 relativeRotation = pA.rotation; // For now, use particle A's rotation as reference
+    
+    // Transform bond direction to local space of particle A
+    float3 localBondDir = bondDir; // Simplified - would need proper quaternion rotation
+    
+    // Convert to pitch, yaw, roll representation
+    float pitch = asin(-localBondDir.y) * 57.2957795131; // Convert to degrees
+    float yaw = atan2(localBondDir.x, localBondDir.z) * 57.2957795131;
+    float roll = 0.0; // For bond direction, roll is typically 0
+    
+    return float3(pitch, yaw, roll);
+}
+
+// Kernel to capture initial bond orientations one frame after creation
+[numthreads(1, 1, 1)]
+void CaptureInitialBondOrientations(uint id : SV_DispatchThreadID)
+{
+    if ((int)id >= (int)adhesionConnectionCount) return;
+    
+    AdhesionConnection conn = adhesionConnectionBuffer[id];
+    
+    // Only capture orientation if it hasn't been captured yet and the bond is one frame old
+    if (conn.orientationCaptured == 0 && (currentFrame - conn.creationFrame) == 1)
+    {
+        int idxA = conn.particleA;
+        int idxB = conn.particleB;
+        int particleCount = (int)particleBuffer.Length;
+        
+        if (idxA >= 0 && idxB >= 0 && idxA < particleCount && idxB < particleCount)
+        {
+            Particle pA = particleBuffer[idxA];
+            Particle pB = particleBuffer[idxB];
+            
+            // Calculate and store initial bond orientation
+            conn.initialPitchYawRoll = CalculateBondOrientation(pA, pB);
+            conn.orientationCaptured = 1;
+            
+            // Write back to buffer
+            adhesionConnectionBuffer[id] = conn;
+        }
+    }
+}
+
+// Kernel to calculate current angular deviations from initial orientations
+[numthreads(1, 1, 1)]
+void CalculateBondOrientationDeviations(uint id : SV_DispatchThreadID)
+{
+    if ((int)id >= (int)adhesionConnectionCount) return;
+    
+    AdhesionConnection conn = adhesionConnectionBuffer[id];
+    
+    // Only calculate deviations for bonds that have captured initial orientations
+    if (conn.orientationCaptured == 1)
+    {
+        int idxA = conn.particleA;
+        int idxB = conn.particleB;
+        int particleCount = (int)particleBuffer.Length;
+        
+        if (idxA >= 0 && idxB >= 0 && idxA < particleCount && idxB < particleCount)
+        {
+            Particle pA = particleBuffer[idxA];
+            Particle pB = particleBuffer[idxB];
+            
+            // Calculate current bond orientation
+            float3 currentOrientation = CalculateBondOrientation(pA, pB);
+            
+            // Calculate deviation from initial orientation
+            float3 deviation = currentOrientation - conn.initialPitchYawRoll;
+            
+            // Handle angle wrapping (keep angles within -180 to 180 degrees)
+            deviation.x = fmod(deviation.x + 540.0, 360.0) - 180.0;
+            deviation.y = fmod(deviation.y + 540.0, 360.0) - 180.0;
+            deviation.z = fmod(deviation.z + 540.0, 360.0) - 180.0;
+            
+            conn.currentDeviation = deviation;
+            
+            // Write back to buffer
+            adhesionConnectionBuffer[id] = conn;
+        }
+    }
 }

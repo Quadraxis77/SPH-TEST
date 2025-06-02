@@ -77,10 +77,11 @@ public class ParticleSystemController : MonoBehaviour
     int kernelApplySPHForces;
     int kernelApplyDrag;
     int kernelUpdateMotion;
-    int kernelUpdateRotation;
-    int kernelCopyPositions;    int kernelCopyRotations;
+    int kernelUpdateRotation;    int kernelCopyPositions;    int kernelCopyRotations;
     int kernelApplyAdhesionConstraints;
     int kernelApplyAdhesionDeltas;
+    int kernelCaptureInitialBondOrientations;
+    int kernelCalculateBondOrientationDeviations;
 
     int selectedParticleID = -1;
     Vector3 dragTargetWorld;
@@ -244,9 +245,7 @@ public class ParticleSystemController : MonoBehaviour
         RequestParticleDataAsync();
 
         // Update cell split timers and handle cell division
-        UpdateCellDivisionTimers(dt);
-
-        computeShader.SetFloat("deltaTime", dt);
+        UpdateCellDivisionTimers(dt);        computeShader.SetFloat("deltaTime", dt);
         computeShader.SetFloat("globalDragMultiplier", globalDragMultiplier);
         computeShader.SetFloat("torqueFactor", torqueFactor);
         computeShader.SetFloat("torqueDamping", torqueDamping);
@@ -255,6 +254,7 @@ public class ParticleSystemController : MonoBehaviour
         computeShader.SetFloat("density", density);
         computeShader.SetFloat("repulsionStrength", repulsionStrength);
         computeShader.SetInt("activeParticleCount", activeParticleCount); // Make sure to set this every frame
+        computeShader.SetInt("currentFrame", Time.frameCount); // Set current frame for bond orientation tracking
         
         torqueAccumBuffer.SetData(new int[particleCount * 3]);
 
@@ -291,12 +291,25 @@ public class ParticleSystemController : MonoBehaviour
                 computeShader.SetBuffer(kernelApplyAdhesionConstraints, "adhesionVelocityDeltaBuffer", adhesionVelocityDeltaBuffer);
                 // Explicitly set deltaTime for the adhesion constraints kernel
                 computeShader.SetFloat("deltaTime", dt);
-                computeShader.Dispatch(kernelApplyAdhesionConstraints, count, 1, 1);
-                  // Apply deltas to each particle
+                computeShader.Dispatch(kernelApplyAdhesionConstraints, count, 1, 1);                // Apply deltas to each particle
                 computeShader.SetBuffer(kernelApplyAdhesionDeltas, "particleBuffer", particleBuffer);
                 computeShader.SetBuffer(kernelApplyAdhesionDeltas, "adhesionVelocityDeltaBuffer", adhesionVelocityDeltaBuffer);
                 computeShader.SetFloat("deltaTime", dt);
                 computeShader.Dispatch(kernelApplyAdhesionDeltas, threadGroups, 1, 1);
+                
+                // --- Bond orientation tracking ---
+                // Capture initial orientations for newly created bonds (one frame after creation)
+                computeShader.SetBuffer(kernelCaptureInitialBondOrientations, "adhesionConnectionBuffer", adhesionConnectionBuffer);
+                computeShader.SetBuffer(kernelCaptureInitialBondOrientations, "particleBuffer", particleBuffer);
+                computeShader.SetInt("adhesionConnectionCount", count);
+                computeShader.Dispatch(kernelCaptureInitialBondOrientations, count, 1, 1);
+                
+                // Calculate current orientation deviations for all bonds with captured initial orientations
+                computeShader.SetBuffer(kernelCalculateBondOrientationDeviations, "adhesionConnectionBuffer", adhesionConnectionBuffer);
+                computeShader.SetBuffer(kernelCalculateBondOrientationDeviations, "particleBuffer", particleBuffer);
+                computeShader.SetInt("adhesionConnectionCount", count);
+                computeShader.Dispatch(kernelCalculateBondOrientationDeviations, count, 1, 1);
+                // --- End bond orientation tracking ---
             }
         }
         // --- End adhesion constraints ---
@@ -388,6 +401,10 @@ public class ParticleSystemController : MonoBehaviour
         kernelCopyRotations     = computeShader.FindKernel("CopyRotationsToReadbackBuffer");
         kernelApplyAdhesionConstraints = computeShader.FindKernel("ApplyAdhesionConstraints");
         kernelApplyAdhesionDeltas = computeShader.FindKernel("ApplyAdhesionDeltas");
+        kernelCaptureInitialBondOrientations = computeShader.FindKernel("CaptureInitialBondOrientations");
+        kernelCalculateBondOrientationDeviations = computeShader.FindKernel("CalculateBondOrientationDeviations");
+        kernelCaptureInitialBondOrientations = computeShader.FindKernel("CaptureInitialBondOrientations");
+        kernelCalculateBondOrientationDeviations = computeShader.FindKernel("CalculateBondOrientationDeviations");
 
         uint[] args = new uint[5]
         {
@@ -422,8 +439,9 @@ public class ParticleSystemController : MonoBehaviour
         {
             adhesionConnectionBuffer.Release();
         }
-        // Each bond is a struct of 36 bytes (int, int, float, float, float, float4)
-        adhesionConnectionBuffer = new ComputeBuffer(maxAdhesionConnections, sizeof(int) * 2 + sizeof(float) * 3 + sizeof(float) * 4);// --- Ensure adhesionVelocityDeltaBuffer is allocated ---
+        // Each bond is now 68 bytes (int, int, float, float, float, float4, float3, int, int, float3)
+        // Breaking down: 4+4+4+4+4+16+12+4+4+12 = 68 bytes
+        adhesionConnectionBuffer = new ComputeBuffer(maxAdhesionConnections, 68);// --- Ensure adhesionVelocityDeltaBuffer is allocated ---
         if (adhesionVelocityDeltaBuffer != null)
         {
             adhesionVelocityDeltaBuffer.Release();
