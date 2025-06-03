@@ -7,6 +7,8 @@
 #pragma kernel UpdateRotation
 #pragma kernel CopyPositionsToReadbackBuffer
 #pragma kernel CopyRotationsToReadbackBuffer
+#pragma kernel CopyInitialOrientationsToReadbackBuffer
+#pragma kernel CopyOrientationDeviationsToReadbackBuffer
 #pragma kernel ApplyAdhesionConstraints
 #pragma kernel ApplyAdhesionDeltas
 #pragma kernel CaptureInitialBondOrientations
@@ -50,11 +52,13 @@ struct AdhesionConnection {
     float springDamping;
     float4 connectionColor; // RGBA
     
-    // Orientation tracking data
-    float3 initialPitchYawRoll; // Initial bond orientation (pitch, yaw, roll in degrees)
+    // Orientation tracking data - separate for each particle
+    float3 initialAnglesA;      // Initial bond angles relative to particle A's facing direction (pitch, yaw, roll in degrees)
+    float3 initialAnglesB;      // Initial bond angles relative to particle B's facing direction (pitch, yaw, roll in degrees)
     int creationFrame;          // Frame when bond was created
     int orientationCaptured;    // Flag: 0 = not captured, 1 = captured
-    float3 currentDeviation;    // Current angular deviation from initial (pitch, yaw, roll in degrees)
+    float3 currentDeviationA;   // Current angular deviation for particle A (pitch, yaw, roll in degrees)
+    float3 currentDeviationB;   // Current angular deviation for particle B (pitch, yaw, roll in degrees)
 };
 
 // Simplified data struct without adhesion properties
@@ -79,6 +83,8 @@ struct DragInput {
 RWStructuredBuffer<Particle> particleBuffer;
 RWStructuredBuffer<float3> positionReadbackBuffer;
 RWStructuredBuffer<float4> rotationReadbackBuffer;
+RWStructuredBuffer<float3> initialOrientationReadbackBuffer;
+RWStructuredBuffer<float3> orientationDeviationReadbackBuffer;
 RWStructuredBuffer<int3> torqueAccumBuffer;
 StructuredBuffer<DragInput> dragInput;
 
@@ -412,6 +418,38 @@ void CopyRotationsToReadbackBuffer(uint id : SV_DispatchThreadID)
     rotationReadbackBuffer[id] = particleBuffer[id].rotation;
 }
 
+[numthreads(THREADS, 1, 1)]
+void CopyInitialOrientationsToReadbackBuffer(uint id : SV_DispatchThreadID)
+{
+    if (id >= (uint)adhesionConnectionCount) return;
+    AdhesionConnection conn = adhesionConnectionBuffer[id];
+    
+    // Copy both particles' initial angles to consecutive slots in the buffer
+    // Each bond uses 2 slots: [bondIndex*2] = particleA, [bondIndex*2+1] = particleB
+    uint baseIndex = id * 2;
+    if (baseIndex + 1 < (uint)initialOrientationReadbackBuffer.Length)
+    {
+        initialOrientationReadbackBuffer[baseIndex] = conn.initialAnglesA;
+        initialOrientationReadbackBuffer[baseIndex + 1] = conn.initialAnglesB;
+    }
+}
+
+[numthreads(THREADS, 1, 1)]
+void CopyOrientationDeviationsToReadbackBuffer(uint id : SV_DispatchThreadID)
+{
+    if (id >= (uint)adhesionConnectionCount) return;
+    AdhesionConnection conn = adhesionConnectionBuffer[id];
+    
+    // Copy both particles' current deviations to consecutive slots in the buffer
+    // Each bond uses 2 slots: [bondIndex*2] = particleA, [bondIndex*2+1] = particleB
+    uint baseIndex = id * 2;
+    if (baseIndex + 1 < (uint)orientationDeviationReadbackBuffer.Length)
+    {
+        orientationDeviationReadbackBuffer[baseIndex] = conn.currentDeviationA;
+        orientationDeviationReadbackBuffer[baseIndex + 1] = conn.currentDeviationB;
+    }
+}
+
 [numthreads(1, 1, 1)]
 void ApplyAdhesionConstraints(uint id : SV_DispatchThreadID)
 {
@@ -490,22 +528,45 @@ float3 QuaternionToEuler(float4 q)
     return angles * 57.2957795131; // 180/PI
 }
 
-// Helper function to calculate bond orientation from two particles
-float3 CalculateBondOrientation(Particle pA, Particle pB)
+// Helper function to transform a vector by the inverse of a quaternion
+float3 RotateVectorByInverseQuaternion(float3 v, float4 q)
 {
-    // Calculate bond direction vector
-    float3 bondDir = normalize(pB.position - pA.position);
+    // Compute the conjugate of the quaternion (inverse for unit quaternions)
+    float4 qConj = float4(-q.x, -q.y, -q.z, q.w);
     
-    // Calculate relative rotation between particles
-    float4 relativeRotation = pA.rotation; // For now, use particle A's rotation as reference
+    // Rotate the vector by the conjugate quaternion
+    // v' = q* * v * q, where q* is the conjugate
+    float3 qvec = qConj.xyz;
+    float qw = qConj.w;
     
-    // Transform bond direction to local space of particle A
-    float3 localBondDir = bondDir; // Simplified - would need proper quaternion rotation
+    // Cross products and dot product for quaternion rotation
+    float3 cross1 = cross(qvec, v);
+    float3 cross2 = cross(qvec, cross1);
     
-    // Convert to pitch, yaw, roll representation
-    float pitch = asin(-localBondDir.y) * 57.2957795131; // Convert to degrees
-    float yaw = atan2(localBondDir.x, localBondDir.z) * 57.2957795131;
-    float roll = 0.0; // For bond direction, roll is typically 0
+    return v + 2.0 * (qw * cross1 + cross2);
+}
+
+// Helper function to calculate bond angles relative to each particle's facing direction
+float3 CalculateBondAnglesRelativeToParticle(Particle particle, float3 bondDirection)
+{
+    // Transform bond direction to particle's local coordinate system
+    // This gives us the bond direction relative to the particle's current orientation
+    float3 localBondDir = RotateVectorByInverseQuaternion(bondDirection, particle.rotation);
+    
+    // Calculate spherical coordinates (pitch, yaw) relative to particle's forward direction
+    // Assuming particle's forward direction is along +Z axis in local space
+    
+    // Normalize to ensure we're working with a unit vector
+    localBondDir = normalize(localBondDir);
+    
+    // Calculate pitch (angle from XZ plane, rotation around X axis)
+    float pitch = asin(localBondDir.y) * 57.2957795131; // Convert to degrees
+    
+    // Calculate yaw (angle in XZ plane, rotation around Y axis)
+    float yaw = atan2(localBondDir.x, localBondDir.z) * 57.2957795131; // Convert to degrees
+    
+    // For bonds, roll is typically not meaningful, so we set it to 0
+    float roll = 0.0;
     
     return float3(pitch, yaw, roll);
 }
@@ -517,9 +578,9 @@ void CaptureInitialBondOrientations(uint id : SV_DispatchThreadID)
     if ((int)id >= (int)adhesionConnectionCount) return;
     
     AdhesionConnection conn = adhesionConnectionBuffer[id];
-    
-    // Only capture orientation if it hasn't been captured yet and the bond is one frame old
-    if (conn.orientationCaptured == 0 && (currentFrame - conn.creationFrame) == 1)
+    // Only capture orientation if it hasn't been captured yet and the bond has existed for at least 1 frame
+    // No upper bound - orientation should be permanently captured whenever possible
+    if (conn.orientationCaptured == 0 && (currentFrame - conn.creationFrame) >= 1)
     {
         int idxA = conn.particleA;
         int idxB = conn.particleB;
@@ -530,8 +591,13 @@ void CaptureInitialBondOrientations(uint id : SV_DispatchThreadID)
             Particle pA = particleBuffer[idxA];
             Particle pB = particleBuffer[idxB];
             
-            // Calculate and store initial bond orientation
-            conn.initialPitchYawRoll = CalculateBondOrientation(pA, pB);
+            // Calculate bond direction vectors
+            float3 bondDirA_to_B = normalize(pB.position - pA.position); // Direction from A to B
+            float3 bondDirB_to_A = normalize(pA.position - pB.position); // Direction from B to A
+            
+            // Calculate initial bond angles relative to each particle's facing direction
+            conn.initialAnglesA = CalculateBondAnglesRelativeToParticle(pA, bondDirA_to_B);
+            conn.initialAnglesB = CalculateBondAnglesRelativeToParticle(pB, bondDirB_to_A);
             conn.orientationCaptured = 1;
             
             // Write back to buffer
@@ -560,18 +626,29 @@ void CalculateBondOrientationDeviations(uint id : SV_DispatchThreadID)
             Particle pA = particleBuffer[idxA];
             Particle pB = particleBuffer[idxB];
             
-            // Calculate current bond orientation
-            float3 currentOrientation = CalculateBondOrientation(pA, pB);
+            // Calculate current bond direction vectors
+            float3 currentBondDirA_to_B = normalize(pB.position - pA.position);
+            float3 currentBondDirB_to_A = normalize(pA.position - pB.position);
             
-            // Calculate deviation from initial orientation
-            float3 deviation = currentOrientation - conn.initialPitchYawRoll;
+            // Calculate current bond angles relative to each particle's facing direction
+            float3 currentAnglesA = CalculateBondAnglesRelativeToParticle(pA, currentBondDirA_to_B);
+            float3 currentAnglesB = CalculateBondAnglesRelativeToParticle(pB, currentBondDirB_to_A);
+            
+            // Calculate deviations from initial orientations for both particles
+            float3 deviationA = currentAnglesA - conn.initialAnglesA;
+            float3 deviationB = currentAnglesB - conn.initialAnglesB;
             
             // Handle angle wrapping (keep angles within -180 to 180 degrees)
-            deviation.x = fmod(deviation.x + 540.0, 360.0) - 180.0;
-            deviation.y = fmod(deviation.y + 540.0, 360.0) - 180.0;
-            deviation.z = fmod(deviation.z + 540.0, 360.0) - 180.0;
+            deviationA.x = fmod(deviationA.x + 540.0, 360.0) - 180.0;
+            deviationA.y = fmod(deviationA.y + 540.0, 360.0) - 180.0;
+            deviationA.z = fmod(deviationA.z + 540.0, 360.0) - 180.0;
             
-            conn.currentDeviation = deviation;
+            deviationB.x = fmod(deviationB.x + 540.0, 360.0) - 180.0;
+            deviationB.y = fmod(deviationB.y + 540.0, 360.0) - 180.0;
+            deviationB.z = fmod(deviationB.z + 540.0, 360.0) - 180.0;
+            
+            conn.currentDeviationA = deviationA;
+            conn.currentDeviationB = deviationB;
             
             // Write back to buffer
             adhesionConnectionBuffer[id] = conn;

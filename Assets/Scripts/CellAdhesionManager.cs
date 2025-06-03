@@ -11,7 +11,7 @@ public class CellAdhesionManager : MonoBehaviour
     public Color zoneBColor = Color.blue;
     public Color zoneCColor = Color.red;
       private List<AdhesionBond> bonds = new List<AdhesionBond>();
-    private List<LineRenderer> bondLines = new List<LineRenderer>();// Metadata for each bond
+    private List<LineRenderer> bondLines = new List<LineRenderer>();    // Metadata for each bond
     public class AdhesionBond
     {
         public int cellA;
@@ -22,11 +22,19 @@ public class CellAdhesionManager : MonoBehaviour
         public bool isChildToChild = false;
         // Store the unique IDs of the two children at bond creation
         public int childAUniqueID;
-        public int childBUniqueID;
-        // Track the initial zone configuration when the bond was created
+        public int childBUniqueID;        // Track the initial zone configuration when the bond was created
         public BondZone initialZoneA;
         public BondZone initialZoneB;
         public int creationFrame; // Track the frame when bond was created
+        
+        // Orientation tracking data (updated by GPU and preserved by CPU)
+        // Separate orientation data for each particle
+        public Vector3 initialAnglesA = Vector3.zero;       // Initial bond angles relative to particle A's facing direction
+        public Vector3 initialAnglesB = Vector3.zero;       // Initial bond angles relative to particle B's facing direction
+        public int orientationCaptured = 0;                 // Flag: 0 = not captured, 1 = captured
+        public Vector3 currentDeviationA = Vector3.zero;    // Current angular deviation for particle A
+        public Vector3 currentDeviationB = Vector3.zero;    // Current angular deviation for particle B
+        
         // Add more metadata as needed
     }
 
@@ -418,11 +426,13 @@ public class CellAdhesionManager : MonoBehaviour
         public float springDamping;
         public Vector4 color;
         
-        // Orientation tracking data
-        public Vector3 initialPitchYawRoll;  // Initial bond orientation (pitch, yaw, roll in degrees)
+        // Orientation tracking data - separate for each particle
+        public Vector3 initialAnglesA;       // Initial bond angles relative to particle A's facing direction (pitch, yaw, roll in degrees)
+        public Vector3 initialAnglesB;       // Initial bond angles relative to particle B's facing direction (pitch, yaw, roll in degrees)
         public int creationFrame;            // Frame when bond was created
         public int orientationCaptured;      // Flag: 0 = not captured, 1 = captured
-        public Vector3 currentDeviation;     // Current angular deviation from initial (pitch, yaw, roll in degrees)
+        public Vector3 currentDeviationA;    // Current angular deviation for particle A (pitch, yaw, roll in degrees)
+        public Vector3 currentDeviationB;    // Current angular deviation for particle B (pitch, yaw, roll in degrees)
     }public AdhesionConnectionExport[] GetAdhesionConnectionsForGPU()
     {
         if (particleSystemController == null) return new AdhesionConnectionExport[0];
@@ -453,13 +463,41 @@ public class CellAdhesionManager : MonoBehaviour
                 springStiffness = springStiffness,
                 springDamping = springDamping,
                 color = color,
-                // Initialize orientation tracking fields
-                initialPitchYawRoll = Vector3.zero,
+                // Use stored orientation tracking data from the bond
+                initialAnglesA = bond.initialAnglesA,
+                initialAnglesB = bond.initialAnglesB,
                 creationFrame = bond.creationFrame,
-                orientationCaptured = 0,  // Will be set to 1 by GPU kernel one frame after creation
-                currentDeviation = Vector3.zero
+                orientationCaptured = bond.orientationCaptured,
+                currentDeviationA = bond.currentDeviationA,
+                currentDeviationB = bond.currentDeviationB
             });
         }
         return result.ToArray();
+    }
+    // Called by ParticleSystemController to update orientation data after GPU kernels run
+    public void UpdateOrientationDataFromGPU(AdhesionConnectionExport[] gpuResults)
+    {
+        if (gpuResults == null || bonds == null) return;
+        
+        // Update bond orientation data with GPU results
+        int minCount = Mathf.Min(bonds.Count, gpuResults.Length);
+        for (int i = 0; i < minCount; i++)
+        {
+            var bond = bonds[i];
+            var gpuData = gpuResults[i];
+            
+            // Verify this is the same bond by checking particle indices
+            int bondIdxA = GetIndexForUniqueID(bond.cellA);
+            int bondIdxB = GetIndexForUniqueID(bond.cellB);
+              if (bondIdxA == gpuData.particleA && bondIdxB == gpuData.particleB)
+            {
+                // Update orientation data from GPU
+                bond.initialAnglesA = gpuData.initialAnglesA;
+                bond.initialAnglesB = gpuData.initialAnglesB;
+                bond.orientationCaptured = gpuData.orientationCaptured;
+                bond.currentDeviationA = gpuData.currentDeviationA;
+                bond.currentDeviationB = gpuData.currentDeviationB;
+            }
+        }
     }
 }

@@ -58,12 +58,10 @@ public class ParticleSystemController : MonoBehaviour
     #endregion
 
     #region Private Fields
-    
-    private LineRenderer circleRenderer;
-    private LineRenderer lineRenderer;
-
-    ComputeBuffer particleBuffer, dragInputBuffer, drawArgsBufferSpheres;
+      private LineRenderer circleRenderer;
+    private LineRenderer lineRenderer;    ComputeBuffer particleBuffer, dragInputBuffer, drawArgsBufferSpheres;
     ComputeBuffer positionReadbackBuffer, rotationReadbackBuffer;
+    ComputeBuffer initialOrientationReadbackBuffer, orientationDeviationReadbackBuffer;
     ComputeBuffer gridHeads, gridNext, gridParticleIndices;
     ComputeBuffer torqueAccumBuffer;
     ComputeBuffer adhesionConnectionBuffer;    ComputeBuffer adhesionVelocityDeltaBuffer;
@@ -73,22 +71,26 @@ public class ParticleSystemController : MonoBehaviour
 
     int kernelInitParticles;
     int kernelClearGrid;
-    int kernelBuildGrid;
-    int kernelApplySPHForces;
+    int kernelBuildGrid;    int kernelApplySPHForces;
     int kernelApplyDrag;
     int kernelUpdateMotion;
     int kernelUpdateRotation;    int kernelCopyPositions;    int kernelCopyRotations;
+    int kernelCopyInitialOrientations;
+    int kernelCopyOrientationDeviations;
     int kernelApplyAdhesionConstraints;
     int kernelApplyAdhesionDeltas;
     int kernelCaptureInitialBondOrientations;
     int kernelCalculateBondOrientationDeviations;
 
     int selectedParticleID = -1;
-    Vector3 dragTargetWorld;
-    private Vector3[] cpuParticlePositions;
+    Vector3 dragTargetWorld;    private Vector3[] cpuParticlePositions;
     public Vector3[] CpuParticlePositions => cpuParticlePositions;
     private Quaternion[] cpuParticleRotations;
     public Quaternion[] CpuParticleRotations => cpuParticleRotations;
+    private Vector3[] cpuInitialOrientations;
+    public Vector3[] CpuInitialOrientations => cpuInitialOrientations;
+    private Vector3[] cpuOrientationDeviations;
+    public Vector3[] CpuOrientationDeviations => cpuOrientationDeviations;
 
     private float currentDragDistance;
     private int activeParticleCount = 1; // Class-level variable to track active particles
@@ -123,9 +125,12 @@ public class ParticleSystemController : MonoBehaviour
     // Add a field to track the most recently dragged/selected cell
     private int lastSelectedParticleID = -1;
     public int LastSelectedParticleID => lastSelectedParticleID;
-    
-    // Maximum number of adhesion connections (arbitrary limit for now)
+      // Maximum number of adhesion connections (arbitrary limit for now)
     int maxAdhesionConnections = 4096;
+    
+    // Current adhesion connection count for CPU access
+    private int currentAdhesionConnectionCount = 0;
+    public int CurrentAdhesionConnectionCount => currentAdhesionConnectionCount;
     
     #endregion
 
@@ -234,11 +239,8 @@ public class ParticleSystemController : MonoBehaviour
         // Initialize particle labels
         InitializeParticleLabels();        // Initialize split plane rings
         InitializeSplitPlaneRings();
-    }
-
-    void Update()
-    {
-        float dt = Time.deltaTime;
+    }    void Update()
+    {        float dt = Time.deltaTime;
         int threadGroups = Mathf.CeilToInt(particleCount / 64f);
 
         // Request asynchronous readback of particle data if needed
@@ -279,6 +281,7 @@ public class ParticleSystemController : MonoBehaviour
         if (adhesionManager != null && adhesionConnectionBuffer != null){
             var connections = adhesionManager.GetAdhesionConnectionsForGPU();
             int count = Mathf.Min(connections.Length, maxAdhesionConnections);
+            currentAdhesionConnectionCount = count; // Update current count for CPU access
             
             if (count > 0)
             {
@@ -296,12 +299,13 @@ public class ParticleSystemController : MonoBehaviour
                 computeShader.SetBuffer(kernelApplyAdhesionDeltas, "adhesionVelocityDeltaBuffer", adhesionVelocityDeltaBuffer);
                 computeShader.SetFloat("deltaTime", dt);
                 computeShader.Dispatch(kernelApplyAdhesionDeltas, threadGroups, 1, 1);
-                
-                // --- Bond orientation tracking ---
+                  // --- Bond orientation tracking ---
                 // Capture initial orientations for newly created bonds (one frame after creation)
                 computeShader.SetBuffer(kernelCaptureInitialBondOrientations, "adhesionConnectionBuffer", adhesionConnectionBuffer);
                 computeShader.SetBuffer(kernelCaptureInitialBondOrientations, "particleBuffer", particleBuffer);
                 computeShader.SetInt("adhesionConnectionCount", count);
+  
+                
                 computeShader.Dispatch(kernelCaptureInitialBondOrientations, count, 1, 1);
                 
                 // Calculate current orientation deviations for all bonds with captured initial orientations
@@ -309,6 +313,12 @@ public class ParticleSystemController : MonoBehaviour
                 computeShader.SetBuffer(kernelCalculateBondOrientationDeviations, "particleBuffer", particleBuffer);
                 computeShader.SetInt("adhesionConnectionCount", count);
                 computeShader.Dispatch(kernelCalculateBondOrientationDeviations, count, 1, 1);
+                
+                // Read back the updated adhesion connection data and update the AdhesionManager
+                var updatedConnections = new CellAdhesionManager.AdhesionConnectionExport[count];
+                adhesionConnectionBuffer.GetData(updatedConnections, 0, 0, count);
+                adhesionManager.UpdateOrientationDataFromGPU(updatedConnections);
+
                 // --- End bond orientation tracking ---
             }
         }
@@ -328,13 +338,37 @@ public class ParticleSystemController : MonoBehaviour
 
         computeShader.SetBuffer(kernelCopyPositions, "particleBuffer", particleBuffer);
         computeShader.SetBuffer(kernelCopyPositions, "positionReadbackBuffer", positionReadbackBuffer);
-        computeShader.Dispatch(kernelCopyPositions, threadGroups, 1, 1);
-
-        computeShader.SetBuffer(kernelCopyRotations, "particleBuffer", particleBuffer);
+        computeShader.Dispatch(kernelCopyPositions, threadGroups, 1, 1);        computeShader.SetBuffer(kernelCopyRotations, "particleBuffer", particleBuffer);
         computeShader.SetBuffer(kernelCopyRotations, "rotationReadbackBuffer", rotationReadbackBuffer);
-        computeShader.Dispatch(kernelCopyRotations, threadGroups, 1, 1);        // Immediate readback of position and rotation data for rendering
+        computeShader.Dispatch(kernelCopyRotations, threadGroups, 1, 1);
+
+        // Copy adhesion bond orientation data to readback buffers for CPU access
+        if (adhesionManager != null && adhesionConnectionBuffer != null)
+        {
+            var connections = adhesionManager.GetAdhesionConnectionsForGPU();
+            int count = Mathf.Min(connections.Length, maxAdhesionConnections);
+            
+            if (count > 0)
+            {
+                computeShader.SetBuffer(kernelCopyInitialOrientations, "adhesionConnectionBuffer", adhesionConnectionBuffer);
+                computeShader.SetBuffer(kernelCopyInitialOrientations, "initialOrientationReadbackBuffer", initialOrientationReadbackBuffer);
+                computeShader.SetInt("adhesionConnectionCount", count);
+                computeShader.Dispatch(kernelCopyInitialOrientations, Mathf.CeilToInt(count / 64f), 1, 1);
+
+                computeShader.SetBuffer(kernelCopyOrientationDeviations, "adhesionConnectionBuffer", adhesionConnectionBuffer);
+                computeShader.SetBuffer(kernelCopyOrientationDeviations, "orientationDeviationReadbackBuffer", orientationDeviationReadbackBuffer);
+                computeShader.SetInt("adhesionConnectionCount", count);
+                computeShader.Dispatch(kernelCopyOrientationDeviations, Mathf.CeilToInt(count / 64f), 1, 1);
+            }
+        }        // Immediate readback of position and rotation data for rendering
         positionReadbackBuffer.GetData(cpuParticlePositions);
         rotationReadbackBuffer.GetData(cpuParticleRotations);
+          // Immediate readback of orientation data for debugging (only if we have connections)
+        if (currentAdhesionConnectionCount > 0)
+        {
+            initialOrientationReadbackBuffer.GetData(cpuInitialOrientations);
+            orientationDeviationReadbackBuffer.GetData(cpuOrientationDeviations);
+        }
 
         uint[] args = new uint[5];
         drawArgsBufferSpheres.GetData(args);
@@ -378,18 +412,22 @@ public class ParticleSystemController : MonoBehaviour
     {
         int stride = 84; // Updated from 80 to 84 to include the modeIndex field
         particleBuffer = new ComputeBuffer(particleCount, stride);
-        dragInputBuffer = new ComputeBuffer(1, sizeof(int) + sizeof(float) * 4);
-        positionReadbackBuffer = new ComputeBuffer(particleCount, sizeof(float) * 3);
+        dragInputBuffer = new ComputeBuffer(1, sizeof(int) + sizeof(float) * 4);        positionReadbackBuffer = new ComputeBuffer(particleCount, sizeof(float) * 3);
         rotationReadbackBuffer = new ComputeBuffer(particleCount, sizeof(float) * 4);
+          // Shared buffers for orientation data from both particles
+        // Each bond uses 2 slots: [bondIndex*2] = particleA, [bondIndex*2+1] = particleB
+        initialOrientationReadbackBuffer = new ComputeBuffer(maxAdhesionConnections * 2, sizeof(float) * 3);
+        orientationDeviationReadbackBuffer = new ComputeBuffer(maxAdhesionConnections * 2, sizeof(float) * 3);
+        
         drawArgsBufferSpheres = new ComputeBuffer(1, 5 * sizeof(uint), ComputeBufferType.IndirectArguments);
 
         gridHeads = new ComputeBuffer(GRID_TOTAL, sizeof(uint));
         gridNext = new ComputeBuffer(particleCount, sizeof(uint));
         gridParticleIndices = new ComputeBuffer(particleCount, sizeof(uint));
-        torqueAccumBuffer = new ComputeBuffer(particleCount, sizeof(int) * 3);
-
-        cpuParticlePositions = new Vector3[particleCount];
+        torqueAccumBuffer = new ComputeBuffer(particleCount, sizeof(int) * 3);        cpuParticlePositions = new Vector3[particleCount];
         cpuParticleRotations = new Quaternion[particleCount];
+        cpuInitialOrientations = new Vector3[maxAdhesionConnections * 2];
+        cpuOrientationDeviations = new Vector3[maxAdhesionConnections * 2];
 
         kernelInitParticles     = computeShader.FindKernel("InitParticles");
         kernelClearGrid         = computeShader.FindKernel("ClearGrid");
@@ -399,6 +437,8 @@ public class ParticleSystemController : MonoBehaviour
         kernelUpdateMotion      = computeShader.FindKernel("UpdateMotion");
         kernelUpdateRotation    = computeShader.FindKernel("UpdateRotation");        kernelCopyPositions     = computeShader.FindKernel("CopyPositionsToReadbackBuffer");
         kernelCopyRotations     = computeShader.FindKernel("CopyRotationsToReadbackBuffer");
+        kernelCopyInitialOrientations = computeShader.FindKernel("CopyInitialOrientationsToReadbackBuffer");
+        kernelCopyOrientationDeviations = computeShader.FindKernel("CopyOrientationDeviationsToReadbackBuffer");
         kernelApplyAdhesionConstraints = computeShader.FindKernel("ApplyAdhesionConstraints");
         kernelApplyAdhesionDeltas = computeShader.FindKernel("ApplyAdhesionDeltas");
         kernelCaptureInitialBondOrientations = computeShader.FindKernel("CaptureInitialBondOrientations");
@@ -439,9 +479,9 @@ public class ParticleSystemController : MonoBehaviour
         {
             adhesionConnectionBuffer.Release();
         }
-        // Each bond is now 68 bytes (int, int, float, float, float, float4, float3, int, int, float3)
-        // Breaking down: 4+4+4+4+4+16+12+4+4+12 = 68 bytes
-        adhesionConnectionBuffer = new ComputeBuffer(maxAdhesionConnections, 68);// --- Ensure adhesionVelocityDeltaBuffer is allocated ---
+        // Each bond is now 92 bytes (int, int, float, float, float, float4, float3, float3, int, int, float3, float3)
+        // Breaking down: 4+4+4+4+4+16+12+12+4+4+12+12 = 92 bytes
+        adhesionConnectionBuffer = new ComputeBuffer(maxAdhesionConnections, 92);// --- Ensure adhesionVelocityDeltaBuffer is allocated ---
         if (adhesionVelocityDeltaBuffer != null)
         {
             adhesionVelocityDeltaBuffer.Release();
@@ -450,12 +490,13 @@ public class ParticleSystemController : MonoBehaviour
     }
 
     private void ReleaseBuffers()
-    {
-        particleBuffer?.Release();
+    {        particleBuffer?.Release();
         dragInputBuffer?.Release();
         drawArgsBufferSpheres?.Release();
         positionReadbackBuffer?.Release();
         rotationReadbackBuffer?.Release();
+        initialOrientationReadbackBuffer?.Release();
+        orientationDeviationReadbackBuffer?.Release();
         gridHeads?.Release();
         gridNext?.Release();
         gridParticleIndices?.Release();
@@ -1144,13 +1185,29 @@ public class ParticleSystemController : MonoBehaviour
                 r.GetData<Vector3>().CopyTo(cpuParticlePositions);
             }
         });
-        
-        // Request rotation data
+          // Request rotation data
         AsyncGPUReadback.Request(rotationReadbackBuffer, r => 
         {
             if (!r.hasError)
             {
                 r.GetData<Quaternion>().CopyTo(cpuParticleRotations);
+            }
+        });
+        
+        // Request orientation data for adhesion bonds
+        AsyncGPUReadback.Request(initialOrientationReadbackBuffer, r => 
+        {
+            if (!r.hasError)
+            {
+                r.GetData<Vector3>().CopyTo(cpuInitialOrientations);
+            }
+        });
+        
+        AsyncGPUReadback.Request(orientationDeviationReadbackBuffer, r => 
+        {
+            if (!r.hasError)
+            {
+                r.GetData<Vector3>().CopyTo(cpuOrientationDeviations);
             }
         });
     }
@@ -1389,6 +1446,293 @@ public class ParticleSystemController : MonoBehaviour
                 particleLabels[index] = tmp;
             }
         }
+    }
+    
+    #endregion
+
+    #region Debug and Testing    // Debug method to test orientation readback
+    [System.Diagnostics.Conditional("UNITY_EDITOR")]
+    public void DebugLogOrientationData()
+    {
+        if (cpuInitialOrientations == null || cpuOrientationDeviations == null)
+        {
+            Debug.Log("Orientation arrays not initialized");
+            return;
+        }
+        
+        Debug.Log($"=== ADHESION ORIENTATION DEBUG (Frame {Time.frameCount}) ===");
+        Debug.Log($"Current adhesion connection count: {currentAdhesionConnectionCount}");
+        Debug.Log($"Max adhesion connections: {maxAdhesionConnections}");
+        
+        if (currentAdhesionConnectionCount == 0)
+        {
+            Debug.Log("No adhesion connections to display");
+            return;
+        }
+        
+        // Get connection data to access particle indices
+        var connections = adhesionManager?.GetAdhesionConnectionsForGPU();
+        if (connections == null)
+        {
+            Debug.Log("No connection data available from adhesion manager");
+            return;
+        }
+        
+        int connectionsToShow = Mathf.Min(currentAdhesionConnectionCount, 10); // Show first 10 connections
+        Debug.Log($"Showing first {connectionsToShow} connections:");
+          for (int i = 0; i < connectionsToShow; i++)
+        {
+            // Each bond uses 2 consecutive slots: [i*2] = particleA, [i*2+1] = particleB
+            int indexA = i * 2;
+            int indexB = i * 2 + 1;
+            
+            Vector3 initialA = (indexA < cpuInitialOrientations.Length) ? cpuInitialOrientations[indexA] : Vector3.zero;
+            Vector3 initialB = (indexB < cpuInitialOrientations.Length) ? cpuInitialOrientations[indexB] : Vector3.zero;
+            Vector3 deviationA = (indexA < cpuOrientationDeviations.Length) ? cpuOrientationDeviations[indexA] : Vector3.zero;
+            Vector3 deviationB = (indexB < cpuOrientationDeviations.Length) ? cpuOrientationDeviations[indexB] : Vector3.zero;
+            
+            // Check if initial orientations have been captured (non-zero values)
+            bool isInitialACaptured = initialA.magnitude > 0.001f;
+            bool isInitialBCaptured = initialB.magnitude > 0.001f;
+            string captureStatus = (isInitialACaptured && isInitialBCaptured) ? "BOTH_CAPTURED" : 
+                                 (isInitialACaptured || isInitialBCaptured) ? "PARTIAL_CAPTURED" : "NOT_CAPTURED";
+            
+            // Calculate deviation magnitudes for easy reading
+            float deviationMagnitudeA = deviationA.magnitude;
+            float deviationMagnitudeB = deviationB.magnitude;
+            
+            // Get particle information for both ends of the bond
+            string particleAInfo = "Unknown";
+            string particleBInfo = "Unknown";
+            string positionInfo = "";
+            
+            if (i < connections.Length)
+            {
+                var conn = connections[i];
+                int particleA = conn.particleA;
+                int particleB = conn.particleB;
+                
+                // Get particle IDs and positions
+                if (particleA >= 0 && particleA < activeParticleCount && particleIDs != null && particleA < particleIDs.Length)
+                {
+                    particleAInfo = $"{particleA}({particleIDs[particleA].GetFormattedID()})";
+                    if (cpuParticlePositions != null && particleA < cpuParticlePositions.Length)
+                    {
+                        var posA = cpuParticlePositions[particleA];
+                        positionInfo += $"A=({posA.x:F2},{posA.y:F2},{posA.z:F2})";
+                    }
+                }
+                else
+                {
+                    particleAInfo = $"{particleA}(INVALID)";
+                }
+                
+                if (particleB >= 0 && particleB < activeParticleCount && particleIDs != null && particleB < particleIDs.Length)
+                {
+                    particleBInfo = $"{particleB}({particleIDs[particleB].GetFormattedID()})";
+                    if (cpuParticlePositions != null && particleB < cpuParticlePositions.Length)
+                    {
+                        var posB = cpuParticlePositions[particleB];
+                        positionInfo += $" B=({posB.x:F2},{posB.y:F2},{posB.z:F2})";
+                        
+                        // Calculate bond length
+                        if (particleA >= 0 && particleA < cpuParticlePositions.Length)
+                        {
+                            float bondLength = Vector3.Distance(cpuParticlePositions[particleA], cpuParticlePositions[particleB]);
+                            positionInfo += $" Len={bondLength:F2}";
+                        }
+                    }
+                }
+                else
+                {
+                    particleBInfo = $"{particleB}(INVALID)";
+                }
+            }
+              Debug.Log($"  Bond {i}: {particleAInfo} ↔ {particleBInfo}");
+            Debug.Log($"    Status={captureStatus}, Positions: {positionInfo}");
+            Debug.Log($"    Particle A - Initial=({initialA.x:F2}, {initialA.y:F2}, {initialA.z:F2}), " +
+                     $"Deviation=({deviationA.x:F2}, {deviationA.y:F2}, {deviationA.z:F2}), Mag={deviationMagnitudeA:F2}°");
+            Debug.Log($"    Particle B - Initial=({initialB.x:F2}, {initialB.y:F2}, {initialB.z:F2}), " +
+                     $"Deviation=({deviationB.x:F2}, {deviationB.y:F2}, {deviationB.z:F2}), Mag={deviationMagnitudeB:F2}°");
+        }
+        
+        Debug.Log("=== END ORIENTATION DEBUG ===");
+    }    // Comprehensive debug method for detailed analysis
+    [System.Diagnostics.Conditional("UNITY_EDITOR")]
+    public void DebugLogDetailedOrientationData()
+    {
+        Debug.Log($"=== DETAILED ADHESION ORIENTATION ANALYSIS (Frame {Time.frameCount}) ===");
+        
+        if (adhesionManager == null)
+        {
+            Debug.Log("AdhesionManager is null");
+            return;
+        }
+        
+        var connections = adhesionManager.GetAdhesionConnectionsForGPU();
+        Debug.Log($"Adhesion connections from manager: {connections.Length}");
+        Debug.Log($"Current connection count: {currentAdhesionConnectionCount}");
+        Debug.Log($"Max connections: {maxAdhesionConnections}");
+        Debug.Log($"Current Frame: {Time.frameCount}");
+        Debug.Log($"Active particle count: {activeParticleCount}");
+        
+        if (cpuInitialOrientations == null || cpuOrientationDeviations == null)
+        {
+            Debug.Log("CPU orientation arrays not initialized");
+            return;
+        }
+        
+        // Show buffer information
+        Debug.Log($"CPU Initial Orientations array length: {cpuInitialOrientations.Length}");
+        Debug.Log($"CPU Orientation Deviations array length: {cpuOrientationDeviations.Length}");
+        Debug.Log($"Particle IDs array length: {(particleIDs?.Length ?? 0)}");
+        Debug.Log($"CPU Positions array length: {(cpuParticlePositions?.Length ?? 0)}");
+        
+        // Show detailed connection information with frame timing
+        int connectionsToAnalyze = Mathf.Min(currentAdhesionConnectionCount, 5);
+        Debug.Log($"\nAnalyzing first {connectionsToAnalyze} connections:");
+          for (int i = 0; i < connectionsToAnalyze; i++)
+        {
+            if (i < connections.Length)
+            {
+                var conn = connections[i];
+                
+                // Each bond uses 2 consecutive slots: [i*2] = particleA, [i*2+1] = particleB
+                int indexA = i * 2;
+                int indexB = i * 2 + 1;
+                
+                Vector3 initialA = (indexA < cpuInitialOrientations.Length) ? cpuInitialOrientations[indexA] : Vector3.zero;
+                Vector3 initialB = (indexB < cpuInitialOrientations.Length) ? cpuInitialOrientations[indexB] : Vector3.zero;
+                Vector3 deviationA = (indexA < cpuOrientationDeviations.Length) ? cpuOrientationDeviations[indexA] : Vector3.zero;
+                Vector3 deviationB = (indexB < cpuOrientationDeviations.Length) ? cpuOrientationDeviations[indexB] : Vector3.zero;                
+                bool hasInitialA = initialA.magnitude > 0.001f;
+                bool hasInitialB = initialB.magnitude > 0.001f;
+                bool hasDeviationA = deviationA.magnitude > 0.001f;
+                bool hasDeviationB = deviationB.magnitude > 0.001f;
+                
+                int framesSinceCreation = Time.frameCount - conn.creationFrame;
+                bool shouldCapture = framesSinceCreation >= 1;
+                
+                Debug.Log($"\n--- Bond {i} Details ---");
+                
+                // Particle A information
+                string particleAInfo = GetParticleInfoString(conn.particleA, "A");
+                Debug.Log($"  Particle A: {particleAInfo}");
+                
+                // Particle B information  
+                string particleBInfo = GetParticleInfoString(conn.particleB, "B");
+                Debug.Log($"  Particle B: {particleBInfo}");
+                
+                // Bond length and validation
+                if (conn.particleA >= 0 && conn.particleA < activeParticleCount && 
+                    conn.particleB >= 0 && conn.particleB < activeParticleCount &&
+                    cpuParticlePositions != null && 
+                    conn.particleA < cpuParticlePositions.Length && 
+                    conn.particleB < cpuParticlePositions.Length)
+                {
+                    float bondLength = Vector3.Distance(cpuParticlePositions[conn.particleA], cpuParticlePositions[conn.particleB]);
+                    Debug.Log($"  Bond Length: {bondLength:F3} units");
+                    Debug.Log($"  Bond Validation: VALID");
+                }
+                else
+                {
+                    Debug.LogWarning($"  Bond Validation: INVALID - particle indices out of range");
+                }
+                
+                // Timing information
+                Debug.Log($"  Creation Frame: {conn.creationFrame}");
+                Debug.Log($"  Current Frame: {Time.frameCount}");
+                Debug.Log($"  Frames Since Creation: {framesSinceCreation}");
+                Debug.Log($"  Should Capture This Frame: {shouldCapture}");                Debug.Log($"  Orientation Captured Flag: {conn.orientationCaptured}");
+                
+                // Orientation data for Particle A
+                Debug.Log($"  Particle A - Initial Orientation: ({initialA.x:F3}, {initialA.y:F3}, {initialA.z:F3})");
+                Debug.Log($"  Particle A - Has Initial Data: {hasInitialA}");
+                Debug.Log($"  Particle A - Current Deviation: ({deviationA.x:F3}, {deviationA.y:F3}, {deviationA.z:F3})");
+                Debug.Log($"  Particle A - Has Deviation Data: {hasDeviationA}");
+                Debug.Log($"  Particle A - Deviation Magnitude: {deviationA.magnitude:F3}°");
+                
+                // Orientation data for Particle B
+                Debug.Log($"  Particle B - Initial Orientation: ({initialB.x:F3}, {initialB.y:F3}, {initialB.z:F3})");
+                Debug.Log($"  Particle B - Has Initial Data: {hasInitialB}");
+                Debug.Log($"  Particle B - Current Deviation: ({deviationB.x:F3}, {deviationB.y:F3}, {deviationB.z:F3})");
+                Debug.Log($"  Particle B - Has Deviation Data: {hasDeviationB}");
+                Debug.Log($"  Particle B - Deviation Magnitude: {deviationB.magnitude:F3}°");
+                
+                if (framesSinceCreation > 5)
+                {
+                    Debug.Log($"  WARNING: Bond is {framesSinceCreation} frames old - may have missed capture window!");
+                }
+            }
+        }
+          // Show overall statistics
+        int capturedCountA = 0;
+        int capturedCountB = 0;
+        int validBondCount = 0;
+        int totalConnections = Mathf.Min(currentAdhesionConnectionCount, connections.Length);
+        
+        for (int i = 0; i < totalConnections; i++)
+        {
+            int indexA = i * 2;
+            int indexB = i * 2 + 1;
+            
+            if (indexA < cpuInitialOrientations.Length && cpuInitialOrientations[indexA].magnitude > 0.001f)
+                capturedCountA++;
+            if (indexB < cpuInitialOrientations.Length && cpuInitialOrientations[indexB].magnitude > 0.001f)
+                capturedCountB++;
+                
+            if (i < connections.Length)
+            {
+                var conn = connections[i];
+                if (conn.particleA >= 0 && conn.particleA < activeParticleCount && 
+                    conn.particleB >= 0 && conn.particleB < activeParticleCount)
+                {
+                    validBondCount++;
+                }
+            }
+        }
+          Debug.Log($"\n=== SUMMARY ===");
+        Debug.Log($"Total connections: {totalConnections}");
+        Debug.Log($"Valid bonds (particle indices in range): {validBondCount}");
+        Debug.Log($"Captured orientations for Particle A: {capturedCountA}");
+        Debug.Log($"Captured orientations for Particle B: {capturedCountB}");
+        Debug.Log($"Capture success rate A: {(totalConnections > 0 ? (capturedCountA * 100f / totalConnections) : 0):F1}%");
+        Debug.Log($"Capture success rate B: {(totalConnections > 0 ? (capturedCountB * 100f / totalConnections) : 0):F1}%");
+        Debug.Log($"Valid bond rate: {(totalConnections > 0 ? (validBondCount * 100f / totalConnections) : 0):F1}%");
+    }
+    
+    // Helper method to get formatted particle information
+    private string GetParticleInfoString(int particleIndex, string label)
+    {
+        if (particleIndex < 0 || particleIndex >= activeParticleCount)
+        {
+            return $"{particleIndex} (INVALID - out of range)";
+        }
+        
+        string info = $"{particleIndex}";
+        
+        // Add particle ID if available
+        if (particleIDs != null && particleIndex < particleIDs.Length)
+        {
+            info += $"({particleIDs[particleIndex].GetFormattedID()})";
+        }
+        else
+        {
+            info += "(no ID data)";
+        }
+        
+        // Add position if available
+        if (cpuParticlePositions != null && particleIndex < cpuParticlePositions.Length)
+        {
+            var pos = cpuParticlePositions[particleIndex];
+            info += $" at ({pos.x:F2}, {pos.y:F2}, {pos.z:F2})";
+        }
+        else
+        {
+            info += " (no position data)";
+        }
+        
+        return info;
     }
     
     #endregion
