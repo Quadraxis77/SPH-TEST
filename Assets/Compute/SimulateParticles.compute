@@ -13,6 +13,7 @@
 #pragma kernel ApplyAdhesionDeltas
 #pragma kernel CaptureInitialBondOrientations
 #pragma kernel CalculateBondOrientationDeviations
+#pragma kernel ApplyBondOrientationConstraints
 
 #pragma target 5.0
 
@@ -59,6 +60,8 @@ struct AdhesionConnection {
     int orientationCaptured;    // Flag: 0 = not captured, 1 = captured
     float3 currentDeviationA;   // Current angular deviation for particle A (pitch, yaw, roll in degrees)
     float3 currentDeviationB;   // Current angular deviation for particle B (pitch, yaw, roll in degrees)
+    float orientationConstraintStrength;
+    float maxAllowedAngleDeviation;
 };
 
 // Simplified data struct without adhesion properties
@@ -546,6 +549,16 @@ float3 RotateVectorByInverseQuaternion(float3 v, float4 q)
     return v + 2.0 * (qw * cross1 + cross2);
 }
 
+// Helper to rotate vector by quaternion
+float3 RotateVectorByQuaternion(float3 v, float4 q)
+{
+    float3 qvec = q.xyz;
+    float qw = q.w;
+    float3 cross1 = cross(qvec, v);
+    float3 cross2 = cross(qvec, cross1);
+    return v + 2.0 * (qw * cross1 + cross2);
+}
+
 // Helper function to calculate bond angles relative to each particle's facing direction
 float3 CalculateBondAnglesRelativeToParticle(Particle particle, float3 bondDirection)
 {
@@ -652,6 +665,53 @@ void CalculateBondOrientationDeviations(uint id : SV_DispatchThreadID)
             
             // Write back to buffer
             adhesionConnectionBuffer[id] = conn;
+        }
+    }
+}
+
+[numthreads(1, 1, 1)]
+void ApplyBondOrientationConstraints(uint id : SV_DispatchThreadID)
+{
+    if ((int)id >= (int)adhesionConnectionCount) return;
+
+    AdhesionConnection conn = adhesionConnectionBuffer[id];
+
+    if (conn.orientationCaptured == 1)
+    {
+        int idxA = conn.particleA;
+        int idxB = conn.particleB;
+        int particleCount = (int)particleBuffer.Length;
+
+        if (idxA >= 0 && idxB >= 0 && idxA < particleCount && idxB < particleCount)
+        {
+            Particle pA = particleBuffer[idxA];
+            Particle pB = particleBuffer[idxB];
+
+            float3 devA = conn.currentDeviationA;
+            float3 devB = conn.currentDeviationB;
+
+            if (conn.maxAllowedAngleDeviation > 0)
+            {
+                devA = clamp(devA, -conn.maxAllowedAngleDeviation, conn.maxAllowedAngleDeviation);
+                devB = clamp(devB, -conn.maxAllowedAngleDeviation, conn.maxAllowedAngleDeviation);
+            }
+
+            float3 torqueLocalA = radians(devA) * conn.orientationConstraintStrength;
+            float3 torqueLocalB = radians(devB) * conn.orientationConstraintStrength;
+
+            float3 torqueWorldA = RotateVectorByQuaternion(torqueLocalA, pA.rotation);
+            float3 torqueWorldB = RotateVectorByQuaternion(torqueLocalB, pB.rotation);
+
+            int3 scaledA = (int3)round(torqueWorldA * deltaTime * TORQUE_SCALE);
+            int3 scaledB = (int3)round(-torqueWorldB * deltaTime * TORQUE_SCALE);
+
+            InterlockedAdd(torqueAccumBuffer[idxA].x, scaledA.x);
+            InterlockedAdd(torqueAccumBuffer[idxA].y, scaledA.y);
+            InterlockedAdd(torqueAccumBuffer[idxA].z, scaledA.z);
+
+            InterlockedAdd(torqueAccumBuffer[idxB].x, scaledB.x);
+            InterlockedAdd(torqueAccumBuffer[idxB].y, scaledB.y);
+            InterlockedAdd(torqueAccumBuffer[idxB].z, scaledB.z);
         }
     }
 }

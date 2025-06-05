@@ -81,6 +81,7 @@ public class ParticleSystemController : MonoBehaviour
     int kernelApplyAdhesionDeltas;
     int kernelCaptureInitialBondOrientations;
     int kernelCalculateBondOrientationDeviations;
+    int kernelApplyBondOrientationConstraints;
 
     int selectedParticleID = -1;
     Vector3 dragTargetWorld;    private Vector3[] cpuParticlePositions;
@@ -313,6 +314,14 @@ public class ParticleSystemController : MonoBehaviour
                 computeShader.SetBuffer(kernelCalculateBondOrientationDeviations, "particleBuffer", particleBuffer);
                 computeShader.SetInt("adhesionConnectionCount", count);
                 computeShader.Dispatch(kernelCalculateBondOrientationDeviations, count, 1, 1);
+
+                // Apply orientation constraint torques
+                computeShader.SetBuffer(kernelApplyBondOrientationConstraints, "adhesionConnectionBuffer", adhesionConnectionBuffer);
+                computeShader.SetBuffer(kernelApplyBondOrientationConstraints, "particleBuffer", particleBuffer);
+                computeShader.SetInt("adhesionConnectionCount", count);
+                computeShader.SetFloat("deltaTime", dt);
+                computeShader.SetBuffer(kernelApplyBondOrientationConstraints, "torqueAccumBuffer", torqueAccumBuffer);
+                computeShader.Dispatch(kernelApplyBondOrientationConstraints, count, 1, 1);
                 
                 // Read back the updated adhesion connection data and update the AdhesionManager
                 var updatedConnections = new CellAdhesionManager.AdhesionConnectionExport[count];
@@ -445,6 +454,7 @@ public class ParticleSystemController : MonoBehaviour
         kernelCalculateBondOrientationDeviations = computeShader.FindKernel("CalculateBondOrientationDeviations");
         kernelCaptureInitialBondOrientations = computeShader.FindKernel("CaptureInitialBondOrientations");
         kernelCalculateBondOrientationDeviations = computeShader.FindKernel("CalculateBondOrientationDeviations");
+        kernelApplyBondOrientationConstraints = computeShader.FindKernel("ApplyBondOrientationConstraints");
 
         uint[] args = new uint[5]
         {
@@ -479,9 +489,8 @@ public class ParticleSystemController : MonoBehaviour
         {
             adhesionConnectionBuffer.Release();
         }
-        // Each bond is now 92 bytes (int, int, float, float, float, float4, float3, float3, int, int, float3, float3)
-        // Breaking down: 4+4+4+4+4+16+12+12+4+4+12+12 = 92 bytes
-        adhesionConnectionBuffer = new ComputeBuffer(maxAdhesionConnections, 92);// --- Ensure adhesionVelocityDeltaBuffer is allocated ---
+        // Each bond is now 100 bytes (int, int, float, float, float, float4, float3, float3, int, int, float3, float3, float, float)
+        adhesionConnectionBuffer = new ComputeBuffer(maxAdhesionConnections, 100);// --- Ensure adhesionVelocityDeltaBuffer is allocated ---
         if (adhesionVelocityDeltaBuffer != null)
         {
             adhesionVelocityDeltaBuffer.Release();

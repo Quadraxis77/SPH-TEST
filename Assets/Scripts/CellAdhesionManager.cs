@@ -34,6 +34,9 @@ public class CellAdhesionManager : MonoBehaviour
         public int orientationCaptured = 0;                 // Flag: 0 = not captured, 1 = captured
         public Vector3 currentDeviationA = Vector3.zero;    // Current angular deviation for particle A
         public Vector3 currentDeviationB = Vector3.zero;    // Current angular deviation for particle B
+
+        public float orientationConstraintStrength = 0f;
+        public float maxAllowedAngleDeviation = 0f;
         
         // Add more metadata as needed
     }
@@ -433,6 +436,8 @@ public class CellAdhesionManager : MonoBehaviour
         public int orientationCaptured;      // Flag: 0 = not captured, 1 = captured
         public Vector3 currentDeviationA;    // Current angular deviation for particle A (pitch, yaw, roll in degrees)
         public Vector3 currentDeviationB;    // Current angular deviation for particle B (pitch, yaw, roll in degrees)
+        public float orientationConstraintStrength;
+        public float maxAllowedAngleDeviation;
     }public AdhesionConnectionExport[] GetAdhesionConnectionsForGPU()
     {
         if (particleSystemController == null) return new AdhesionConnectionExport[0];
@@ -451,18 +456,26 @@ public class CellAdhesionManager : MonoBehaviour
             float springStiffness = 100f;
             float springDamping = 5f;
             Vector4 color = new Vector4(1,1,1,1);
+            float orientStrength = 0f;
+            float maxDeviation = 0f;
             if (genome != null && modeA < genome.modes.Count)
             {
                 restLength = genome.modes[modeA].adhesionRestLength;
                 springStiffness = genome.modes[modeA].adhesionSpringStiffness;
-                springDamping = genome.modes[modeA].adhesionSpringDamping;                color = genome.modes[modeA].modeColor;
-            }            result.Add(new AdhesionConnectionExport {
+                springDamping = genome.modes[modeA].adhesionSpringDamping;
+                orientStrength = genome.modes[modeA].orientationConstraintStrength;
+                maxDeviation = genome.modes[modeA].maxAllowedAngleDeviation;
+                color = genome.modes[modeA].modeColor;
+            }
+            result.Add(new AdhesionConnectionExport {
                 particleA = idxA,
                 particleB = idxB,
                 restLength = restLength,
                 springStiffness = springStiffness,
                 springDamping = springDamping,
                 color = color,
+                orientationConstraintStrength = orientStrength,
+                maxAllowedAngleDeviation = maxDeviation,
                 // Use stored orientation tracking data from the bond
                 initialAnglesA = bond.initialAnglesA,
                 initialAnglesB = bond.initialAnglesB,
