@@ -32,7 +32,7 @@ MonoBehaviour:
     adhesionRestLength: 1
     adhesionSpringStiffness: 10
     adhesionSpringDamping: 0
-    orientationConstraintStrength: 0
-    maxAllowedAngleDeviation: 0
+    orientationConstraintStrength: 10
+    maxAllowedAngleDeviation: 30
     adhesionCanBreak: 0
     adhesionBreakForce: 100
