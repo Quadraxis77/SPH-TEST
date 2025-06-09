@@ -69,13 +69,12 @@ public class CellAdhesionManager : MonoBehaviour
     {
         UpdateBondVisuals();
         // EnforceSpringWithOrientation(); // Removed: now handled on GPU
-    }
-
-    // Helper class to hold LineRenderers for a bond
+    }    // Helper class to hold LineRenderers for a bond
     private class BondVisual
     {
         public LineRenderer lrA;
         public LineRenderer lrB;
+        public LineRenderer anchorLine; // New: white line from anchor to anchor
     }
     // Map bonds to visuals
     private Dictionary<AdhesionBond, BondVisual> bondVisuals = new Dictionary<AdhesionBond, BondVisual>();
@@ -123,21 +122,18 @@ public class CellAdhesionManager : MonoBehaviour
 
         bonds.Add(bond);
         CreateBondVisual(bond);
-    }
-
-    public void ClearBonds()
+    }    public void ClearBonds()
     {
         bonds.Clear();
         foreach (var vis in bondVisuals.Values)
         {
             if (vis.lrA != null) Destroy(vis.lrA.gameObject);
             if (vis.lrB != null) Destroy(vis.lrB.gameObject);
+            if (vis.anchorLine != null) Destroy(vis.anchorLine.gameObject);
         }
         bondVisuals.Clear();
         bondLines.Clear();
-    }
-
-    private void CreateBondVisual(AdhesionBond bond)
+    }private void CreateBondVisual(AdhesionBond bond)
     {
         // Create two LineRenderers for the bond
         var goA = new GameObject($"Bond_{bond.cellA}_to_mid");
@@ -146,26 +142,38 @@ public class CellAdhesionManager : MonoBehaviour
         lrA.startWidth = bondWidth;
         lrA.endWidth = bondWidth;
         lrA.material = bondMaterial != null ? bondMaterial : new Material(Shader.Find("Sprites/Default"));
+        
         var goB = new GameObject($"Bond_mid_to_{bond.cellB}");
         var lrB = goB.AddComponent<LineRenderer>();
         lrB.positionCount = 2;
         lrB.startWidth = bondWidth;
         lrB.endWidth = bondWidth;
         lrB.material = bondMaterial != null ? bondMaterial : new Material(Shader.Find("Sprites/Default"));
-        bondVisuals[bond] = new BondVisual { lrA = lrA, lrB = lrB };
+          // Create anchor-to-anchor bond (white line)
+        var goAnchor = new GameObject($"AnchorBond_{bond.cellA}_to_{bond.cellB}");
+        var lrAnchor = goAnchor.AddComponent<LineRenderer>();
+        lrAnchor.positionCount = 2;
+        lrAnchor.startWidth = bondWidth * 0.5f; // Make it thinner
+        lrAnchor.endWidth = bondWidth * 0.5f;
+        lrAnchor.material = bondMaterial != null ? bondMaterial : new Material(Shader.Find("Sprites/Default"));
+        lrAnchor.startColor = Color.white; // Make it white
+        lrAnchor.endColor = Color.white;
+        
+        bondVisuals[bond] = new BondVisual { lrA = lrA, lrB = lrB, anchorLine = lrAnchor };
         bondLines.Add(lrA);
         bondLines.Add(lrB);
-    }
-
-    private void RemoveBondVisual(AdhesionBond bond)
+        bondLines.Add(lrAnchor);
+    }    private void RemoveBondVisual(AdhesionBond bond)
     {
         if (bondVisuals.TryGetValue(bond, out var vis))
         {
             if (vis.lrA != null) Destroy(vis.lrA.gameObject);
             if (vis.lrB != null) Destroy(vis.lrB.gameObject);
+            if (vis.anchorLine != null) Destroy(vis.anchorLine.gameObject);
             bondVisuals.Remove(bond);
             bondLines.Remove(vis.lrA);
             bondLines.Remove(vis.lrB);
+            bondLines.Remove(vis.anchorLine);
         }
     }
 
@@ -248,8 +256,8 @@ public class CellAdhesionManager : MonoBehaviour
         {
             if (!bondVisuals.ContainsKey(bond))
                 CreateBondVisual(bond);
-        }
-        var positions = particleSystemController.CpuParticlePositions;
+        }        var positions = particleSystemController.CpuParticlePositions;
+        var rotations = particleSystemController.CpuParticleRotations;
         // Update positions/colors for all visuals
         foreach (var bond in bonds)
         {
@@ -271,6 +279,23 @@ public class CellAdhesionManager : MonoBehaviour
             vis.lrB.SetPosition(1, posB);
             vis.lrB.startColor = colorB;
             vis.lrB.endColor = colorB;
+            
+            // Update anchor-to-anchor bond (white line)
+            if (vis.anchorLine != null && bond.anchorA != null && bond.anchorB != null && 
+                rotations != null && idxA < rotations.Length && idxB < rotations.Length)
+            {
+                Quaternion rotA = rotations[idxA];
+                Quaternion rotB = rotations[idxB];
+                
+                // Transform stored local anchor positions to world space
+                Vector3 anchorWorldPosA = posA + (rotA * bond.anchorA.localPosition);
+                Vector3 anchorWorldPosB = posB + (rotB * bond.anchorB.localPosition);
+                
+                vis.anchorLine.SetPosition(0, anchorWorldPosA);
+                vis.anchorLine.SetPosition(1, anchorWorldPosB);
+                vis.anchorLine.startColor = Color.white;
+                vis.anchorLine.endColor = Color.white;
+            }
         }
     }
 
