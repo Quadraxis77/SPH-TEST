@@ -456,6 +456,9 @@ void ApplyAdhesionConstraints(uint id : SV_DispatchThreadID)
         InterlockedAdd(adhesionVelocityDeltaBuffer[idxB].z, scaledB.z);    }    // --- Anchor-to-anchor distance minimization constraint ---
     if (conn.enableAnchorConstraint == 1)
     {
+        // Calculate constraint strength (available for both anchor and orientation constraints)
+        float constraintStrength = conn.anchorConstraintStiffness * deltaTime;
+        
         // Calculate current anchor positions in world space
         float3 currentAnchorA = pA.position + quat_rotate(pA.rotation, conn.anchorLocalPosA);
         float3 currentAnchorB = pB.position + quat_rotate(pB.rotation, conn.anchorLocalPosB);
@@ -467,9 +470,6 @@ void ApplyAdhesionConstraints(uint id : SV_DispatchThreadID)
         if (anchorDist > 1e-6)
         {
             float3 anchorDir = anchorDelta / anchorDist;
-            
-            // Apply constraint with configurable stiffness
-            float constraintStrength = conn.anchorConstraintStiffness * deltaTime;
             
             // For particle A: calculate gradient of anchor distance with respect to rotation
             // We want to rotate A such that its anchor moves toward B's anchor
@@ -536,9 +536,49 @@ void ApplyAdhesionConstraints(uint id : SV_DispatchThreadID)
                     InterlockedAdd(adhesionRotationDeltaBuffer[idxB].x, scaledRotB.x);
                     InterlockedAdd(adhesionRotationDeltaBuffer[idxB].y, scaledRotB.y);
                     InterlockedAdd(adhesionRotationDeltaBuffer[idxB].z, scaledRotB.z);
-                    InterlockedAdd(adhesionRotationDeltaBuffer[idxB].w, scaledRotB.w);
-                }
-            }
+                    InterlockedAdd(adhesionRotationDeltaBuffer[idxB].w, scaledRotB.w);                }
+            }        }
+          // --- Relative orientation constraint ---
+        // Constrain the free rotation around the bond axis by maintaining initial relative orientation
+        float4 currentRelOrientation = quat_mul(quat_conjugate(pA.rotation), pB.rotation);
+        float4 targetRelOrientation = conn.initialRelOrientation;
+        
+        // Calculate the rotation needed to get from current to target relative orientation
+        float4 correctionQuat = quat_mul(targetRelOrientation, quat_conjugate(currentRelOrientation));
+        
+        // Extract rotation angle - if the quaternion is close to identity, the angle is small
+        float correctionAngle = 2.0f * atan2(length(correctionQuat.xyz), abs(correctionQuat.w));
+        
+        // Only apply correction if there's a significant deviation
+        if (correctionAngle > 1e-6)
+        {
+            float3 correctionAxis = normalize(correctionQuat.xyz);
+            // Use the genome-controlled constraint strength (constraintStrength already includes the genome value)
+            float orientationConstraintStrength = constraintStrength * 2.0f; // Increase orientation constraint strength
+            
+            // Apply counter-rotations to both particles to restore relative orientation
+            float rotAngleA = -orientationConstraintStrength * correctionAngle * 0.5f;
+            float rotAngleB = orientationConstraintStrength * correctionAngle * 0.5f;
+            
+            // Particle A gets rotation in opposite direction
+            float4 rotQuatA = float4(correctionAxis * sin(rotAngleA * 0.5f), cos(rotAngleA * 0.5f));
+            float4 rotDeltaA = quat_mul(rotQuatA, pA.rotation) - pA.rotation;
+            
+            int4 scaledRotA = (int4)round(rotDeltaA * ADHESION_DELTA_SCALE);
+            InterlockedAdd(adhesionRotationDeltaBuffer[idxA].x, scaledRotA.x);
+            InterlockedAdd(adhesionRotationDeltaBuffer[idxA].y, scaledRotA.y);
+            InterlockedAdd(adhesionRotationDeltaBuffer[idxA].z, scaledRotA.z);
+            InterlockedAdd(adhesionRotationDeltaBuffer[idxA].w, scaledRotA.w);
+            
+            // Particle B gets rotation in same direction
+            float4 rotQuatB = float4(correctionAxis * sin(rotAngleB * 0.5f), cos(rotAngleB * 0.5f));
+            float4 rotDeltaB = quat_mul(rotQuatB, pB.rotation) - pB.rotation;
+            
+            int4 scaledRotB = (int4)round(rotDeltaB * ADHESION_DELTA_SCALE);
+            InterlockedAdd(adhesionRotationDeltaBuffer[idxB].x, scaledRotB.x);
+            InterlockedAdd(adhesionRotationDeltaBuffer[idxB].y, scaledRotB.y);
+            InterlockedAdd(adhesionRotationDeltaBuffer[idxB].z, scaledRotB.z);
+            InterlockedAdd(adhesionRotationDeltaBuffer[idxB].w, scaledRotB.w);
         }
     }
 }

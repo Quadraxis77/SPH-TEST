@@ -29,10 +29,10 @@ MonoBehaviour:
     childB_OrientationYaw: 90
     childB_OrientationPitch: 0
     childB_KeepAdhesion: 1
-    adhesionRestLength: 1
-    adhesionSpringStiffness: 10
+    adhesionRestLength: 2.96
+    adhesionSpringStiffness: 200
     adhesionSpringDamping: 0
-    orientationConstraintStrength: 0
+    orientationConstraintStrength: 0.493
     maxAllowedAngleDeviation: 0
     adhesionCanBreak: 0
     adhesionBreakForce: 100
