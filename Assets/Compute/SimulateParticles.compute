@@ -48,6 +48,10 @@ struct AdhesionConnection {
     float springDamping;
     float4 connectionColor; // RGBA
     float4 initialRelOrientation; // New: relative orientation from A to B at bond creation
+    float3 anchorLocalPosA; // Local anchor position on particle A
+    float3 anchorLocalPosB; // Local anchor position on particle B
+    float anchorConstraintStiffness; // Stiffness for anchor-to-anchor constraint
+    int enableAnchorConstraint; // 1 if enabled, 0 if disabled
 };
 
 // Simplified data struct without adhesion properties
@@ -360,6 +364,18 @@ float4 quat_mul(float4 q1, float4 q2)
     );
 }
 
+// Quaternion conjugate (inverse for unit quaternions)
+float4 quat_conjugate(float4 q)
+{
+    return float4(-q.xyz, q.w);
+}
+
+// Rotate a vector by a quaternion
+float3 quat_rotate(float4 q, float3 v)
+{
+    return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v);
+}
+
 [numthreads(THREADS, 1, 1)]
 void UpdateRotation(uint id : SV_DispatchThreadID)
 {
@@ -437,20 +453,94 @@ void ApplyAdhesionConstraints(uint id : SV_DispatchThreadID)
         InterlockedAdd(adhesionVelocityDeltaBuffer[idxA].z, scaledA.z);
         InterlockedAdd(adhesionVelocityDeltaBuffer[idxB].x, scaledB.x);
         InterlockedAdd(adhesionVelocityDeltaBuffer[idxB].y, scaledB.y);
-        InterlockedAdd(adhesionVelocityDeltaBuffer[idxB].z, scaledB.z);
-    }    // --- Orientation constraint (keep relative orientation fixed) ---
-    float4 rotA = pA.rotation;
-    float4 rotB = pB.rotation;
-    float4 rel = conn.initialRelOrientation;
-    float4 targetRotB = quat_mul(rotA, rel);
-    float orientationStiffness = 10.0f;
-    float t = saturate(orientationStiffness * deltaTime);
-    float4 newRotB = normalize(lerp(rotB, targetRotB, t));    float4 rotDelta = newRotB - rotB;
-    int4 scaledRot = (int4)round(rotDelta * ADHESION_DELTA_SCALE);
-    InterlockedAdd(adhesionRotationDeltaBuffer[idxB].x, scaledRot.x);
-    InterlockedAdd(adhesionRotationDeltaBuffer[idxB].y, scaledRot.y);
-    InterlockedAdd(adhesionRotationDeltaBuffer[idxB].z, scaledRot.z);
-    InterlockedAdd(adhesionRotationDeltaBuffer[idxB].w, scaledRot.w);
+        InterlockedAdd(adhesionVelocityDeltaBuffer[idxB].z, scaledB.z);    }    // --- Anchor-to-anchor distance minimization constraint ---
+    if (conn.enableAnchorConstraint == 1)
+    {
+        // Calculate current anchor positions in world space
+        float3 currentAnchorA = pA.position + quat_rotate(pA.rotation, conn.anchorLocalPosA);
+        float3 currentAnchorB = pB.position + quat_rotate(pB.rotation, conn.anchorLocalPosB);
+        
+        // Calculate current anchor-to-anchor vector and distance
+        float3 anchorDelta = currentAnchorB - currentAnchorA;
+        float anchorDist = length(anchorDelta);
+        
+        if (anchorDist > 1e-6)
+        {
+            float3 anchorDir = anchorDelta / anchorDist;
+            
+            // Apply constraint with configurable stiffness
+            float constraintStrength = conn.anchorConstraintStiffness * deltaTime;
+            
+            // For particle A: calculate gradient of anchor distance with respect to rotation
+            // We want to rotate A such that its anchor moves toward B's anchor
+            float3 rA = conn.anchorLocalPosA; // Local anchor position on A
+            
+            // The world position of anchor A is: pA.position + quat_rotate(pA.rotation, rA)
+            // We want to find rotation that minimizes |anchorB - anchorA|^2
+            // Gradient w.r.t. rotation of A points in direction that reduces distance
+            
+            // Calculate the desired direction for anchor A to move (toward anchor B)
+            float3 desiredMoveA = anchorDir; // Direction from A's anchor toward B's anchor
+            
+            // Find rotation axis that would move anchor A in the desired direction
+            // The velocity of anchor A due to angular velocity ω is: ω × rA_world
+            // where rA_world = quat_rotate(pA.rotation, rA)
+            float3 rA_world = quat_rotate(pA.rotation, conn.anchorLocalPosA);
+            
+            // We want: ω × rA_world = k * desiredMoveA for some positive k
+            // This gives us: ω = k * (rA_world × desiredMoveA) / |rA_world|^2
+            float3 rotAxisA = cross(rA_world, desiredMoveA);
+            float rotAxisLengthA = length(rotAxisA);
+            
+            if (rotAxisLengthA > 1e-6)
+            {
+                rotAxisA = normalize(rotAxisA);
+                
+                // Calculate how much this rotation would help (dot product gives the component)
+                float effectiveness = abs(dot(cross(rotAxisA, rA_world), desiredMoveA));
+                
+                if (effectiveness > 1e-6)
+                {                    // Apply much stronger rotation in this direction
+                    float rotAngleA = constraintStrength * effectiveness * 5.0f;
+                    float4 rotQuatA = float4(rotAxisA * sin(rotAngleA * 0.5f), cos(rotAngleA * 0.5f));
+                    float4 rotDeltaA = quat_mul(rotQuatA, pA.rotation) - pA.rotation;
+                    
+                    int4 scaledRotA = (int4)round(rotDeltaA * ADHESION_DELTA_SCALE);
+                    InterlockedAdd(adhesionRotationDeltaBuffer[idxA].x, scaledRotA.x);
+                    InterlockedAdd(adhesionRotationDeltaBuffer[idxA].y, scaledRotA.y);
+                    InterlockedAdd(adhesionRotationDeltaBuffer[idxA].z, scaledRotA.z);
+                    InterlockedAdd(adhesionRotationDeltaBuffer[idxA].w, scaledRotA.w);
+                }
+            }
+            
+            // For particle B: calculate gradient of anchor distance with respect to rotation
+            float3 desiredMoveB = -anchorDir; // Direction from B's anchor toward A's anchor
+            float3 rB_world = quat_rotate(pB.rotation, conn.anchorLocalPosB);
+            
+            float3 rotAxisB = cross(rB_world, desiredMoveB);
+            float rotAxisLengthB = length(rotAxisB);
+            
+            if (rotAxisLengthB > 1e-6)
+            {
+                rotAxisB = normalize(rotAxisB);
+                
+                float effectiveness = abs(dot(cross(rotAxisB, rB_world), desiredMoveB));
+                
+                if (effectiveness > 1e-6)
+                {
+                    float rotAngleB = constraintStrength * effectiveness * 5.0f;
+                    float4 rotQuatB = float4(rotAxisB * sin(rotAngleB * 0.5f), cos(rotAngleB * 0.5f));
+                    float4 rotDeltaB = quat_mul(rotQuatB, pB.rotation) - pB.rotation;
+                    
+                    int4 scaledRotB = (int4)round(rotDeltaB * ADHESION_DELTA_SCALE);
+                    InterlockedAdd(adhesionRotationDeltaBuffer[idxB].x, scaledRotB.x);
+                    InterlockedAdd(adhesionRotationDeltaBuffer[idxB].y, scaledRotB.y);
+                    InterlockedAdd(adhesionRotationDeltaBuffer[idxB].z, scaledRotB.z);
+                    InterlockedAdd(adhesionRotationDeltaBuffer[idxB].w, scaledRotB.w);
+                }
+            }
+        }
+    }
 }
 
 [numthreads(THREADS, 1, 1)]

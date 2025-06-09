@@ -432,9 +432,9 @@ public class ParticleSystemController : MonoBehaviour
         if (adhesionConnectionBuffer != null)
         {
             adhesionConnectionBuffer.Release();
-        }
-        // Each bond is a struct of 48 bytes (int, int, float, float, float, float4, float4)
-        adhesionConnectionBuffer = new ComputeBuffer(maxAdhesionConnections, sizeof(int) * 2 + sizeof(float) * 3 + sizeof(float) * 4 + sizeof(float) * 4);
+        }        // Each bond is a struct with updated size: int, int, float, float, float, float4, float4, float3, float3, float, int
+        // = 2*4 + 3*4 + 4*4 + 4*4 + 3*4 + 3*4 + 4 + 4 = 8 + 12 + 16 + 16 + 12 + 12 + 4 + 4 = 84 bytes
+        adhesionConnectionBuffer = new ComputeBuffer(maxAdhesionConnections, 84);
 
         // --- Ensure adhesionVelocityDeltaBuffer and adhesionRotationDeltaBuffer are allocated ---
         if (adhesionVelocityDeltaBuffer != null)

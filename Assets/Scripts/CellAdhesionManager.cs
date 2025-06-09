@@ -10,11 +10,15 @@ public class CellAdhesionManager : MonoBehaviour
     public Color zoneAColor = Color.green;
     public Color zoneBColor = Color.blue;
     public Color zoneCColor = Color.red;
-    
-    // Anchor visualization properties
+      // Anchor visualization properties
     public bool showAnchors = true;
     public float anchorSize = 0.1f;
     public Color anchorColor = Color.yellow;
+      // Rigid body constraint properties
+    [Header("Rigid Body Constraints")]
+    public bool enableAnchorConstraints = true;
+    [Range(1.0f, 500.0f)]
+    public float anchorConstraintStiffness = 100.0f;
 
     private List<AdhesionBond> bonds = new List<AdhesionBond>();
     private List<LineRenderer> bondLines = new List<LineRenderer>();
@@ -503,8 +507,7 @@ public class CellAdhesionManager : MonoBehaviour
             // Mark as direct child-to-child bond, store unique IDs for exemption
             AddBond(uniqueA, uniqueB, BondZone.ZoneC, BondZone.ZoneC, true, uniqueA, uniqueB);
         }
-    }
-    // Export all current bonds as an array of structs for the compute shader
+    }    // Export all current bonds as an array of structs for the compute shader
     public struct AdhesionConnectionExport
     {
         public int particleA;
@@ -514,7 +517,11 @@ public class CellAdhesionManager : MonoBehaviour
         public float springDamping;
         public Vector4 color;
         public Vector4 initialRelOrientation; // New: relative orientation as float4
-    }    public AdhesionConnectionExport[] GetAdhesionConnectionsForGPU()
+        public Vector3 anchorLocalPosA; // Local anchor position on particle A
+        public Vector3 anchorLocalPosB; // Local anchor position on particle B
+        public float anchorConstraintStiffness; // Stiffness for anchor-to-anchor constraint
+        public int enableAnchorConstraint; // 1 if enabled, 0 if disabled
+    }public AdhesionConnectionExport[] GetAdhesionConnectionsForGPU()
     {
         if (particleSystemController == null) return new AdhesionConnectionExport[0];
         var ids = particleSystemController.ParticleIDs;
@@ -538,15 +545,19 @@ public class CellAdhesionManager : MonoBehaviour
                 springStiffness = genome.modes[modeA].adhesionSpringStiffness;
                 springDamping = genome.modes[modeA].adhesionSpringDamping;
                 color = genome.modes[modeA].modeColor;
-            }
-            result.Add(new AdhesionConnectionExport {
+            }            result.Add(new AdhesionConnectionExport {
                 particleA = idxA,
                 particleB = idxB,
                 restLength = restLength,
                 springStiffness = springStiffness,
                 springDamping = springDamping,
                 color = color,
-                initialRelOrientation = new Vector4(bond.initialRelOrientation.x, bond.initialRelOrientation.y, bond.initialRelOrientation.z, bond.initialRelOrientation.w)            });
+                initialRelOrientation = new Vector4(bond.initialRelOrientation.x, bond.initialRelOrientation.y, bond.initialRelOrientation.z, bond.initialRelOrientation.w),
+                anchorLocalPosA = bond.anchorA != null ? bond.anchorA.localPosition : Vector3.zero,
+                anchorLocalPosB = bond.anchorB != null ? bond.anchorB.localPosition : Vector3.zero,
+                anchorConstraintStiffness = anchorConstraintStiffness,
+                enableAnchorConstraint = enableAnchorConstraints ? 1 : 0
+            });
         }
         return result.ToArray();
     }    private void OnDrawGizmos()
