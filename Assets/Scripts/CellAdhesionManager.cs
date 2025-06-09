@@ -13,12 +13,12 @@ public class CellAdhesionManager : MonoBehaviour
       // Anchor visualization properties
     public bool showAnchors = true;
     public float anchorSize = 0.1f;
-    public Color anchorColor = Color.yellow;
-      // Rigid body constraint properties
+    public Color anchorColor = Color.yellow;    // Rigid body constraint properties
     [Header("Rigid Body Constraints")]
     public bool enableAnchorConstraints = true;
-    [Range(1.0f, 500.0f)]
-    public float anchorConstraintStiffness = 100.0f;
+    // Anchor constraint stiffness is now controlled by orientationConstraintStrength in the genome
+    // [Range(1.0f, 500.0f)]
+    // public float anchorConstraintStiffness = 100.0f;
 
     private List<AdhesionBond> bonds = new List<AdhesionBond>();
     private List<LineRenderer> bondLines = new List<LineRenderer>();
@@ -534,16 +534,17 @@ public class CellAdhesionManager : MonoBehaviour
             if (idxA < 0 || idxB < 0) continue;
             int modeA = 0;
             if (ids != null && idxA < ids.Length && genome != null && genome.modes.Count > 0)
-                modeA = particleSystemController.ParticleIDs[idxA].uniqueID % genome.modes.Count;
-            float restLength = 2.0f;
+                modeA = particleSystemController.ParticleIDs[idxA].uniqueID % genome.modes.Count;            float restLength = 2.0f;
             float springStiffness = 100f;
             float springDamping = 5f;
+            float orientationConstraintStrength = 0.5f; // Default value
             Vector4 color = new Vector4(1,1,1,1);
             if (genome != null && modeA < genome.modes.Count)
             {
                 restLength = genome.modes[modeA].adhesionRestLength;
                 springStiffness = genome.modes[modeA].adhesionSpringStiffness;
                 springDamping = genome.modes[modeA].adhesionSpringDamping;
+                orientationConstraintStrength = genome.modes[modeA].orientationConstraintStrength;
                 color = genome.modes[modeA].modeColor;
             }            result.Add(new AdhesionConnectionExport {
                 particleA = idxA,
@@ -555,7 +556,7 @@ public class CellAdhesionManager : MonoBehaviour
                 initialRelOrientation = new Vector4(bond.initialRelOrientation.x, bond.initialRelOrientation.y, bond.initialRelOrientation.z, bond.initialRelOrientation.w),
                 anchorLocalPosA = bond.anchorA != null ? bond.anchorA.localPosition : Vector3.zero,
                 anchorLocalPosB = bond.anchorB != null ? bond.anchorB.localPosition : Vector3.zero,
-                anchorConstraintStiffness = anchorConstraintStiffness,
+                anchorConstraintStiffness = orientationConstraintStrength * 10.0f, // Scale the 0-1 range to a reasonable strength value
                 enableAnchorConstraint = enableAnchorConstraints ? 1 : 0
             });
         }
